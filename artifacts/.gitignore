@@ -1,0 +1,15 @@
+# Ignore generated runtime artifacts while keeping the directory structure in the repo.
+*
+!.gitignore
+!packages/
+!packages/.gitkeep
+!work/
+!work/.gitkeep
+!work/export/
+!work/export/.gitkeep
+!work/import/
+!work/import/.gitkeep
+!logs/
+!logs/.gitkeep
+!reports/
+!reports/.gitkeep
