@@ -586,6 +586,17 @@ Run-Test 'Get-DataFabricInsertedRecordIds handles single insert response' {
     Assert-Equal $ids[0] 'dest-1' 'Inserted ID should be extracted.'
 }
 
+Run-Test 'Get-DataFabricInsertedRecordIds handles batch string ID response' {
+    $response = [pscustomobject]@{
+        Result = 'Success'
+        Data = @('dest-1', 'dest-2', 'dest-3')
+    }
+
+    $ids = @(Get-DataFabricInsertedRecordIds -InsertResponse $response)
+    Assert-Equal @($ids).Count 3 'Batch string ID responses should map every inserted record.'
+    Assert-Equal $ids[2] 'dest-3' 'String IDs should be retained in source order.'
+}
+
 Run-Test 'ConvertTo-DataFabricMappedRelationshipValue maps string IDs' {
     $map = @{ 'source-parent' = 'dest-parent' }
     $result = ConvertTo-DataFabricMappedRelationshipValue -Value 'source-parent' -RecordIdMap $map
@@ -685,6 +696,60 @@ Run-Test 'Export-DataFabricPackage creates package manifest with fake CLI respon
         $records = Get-Content -LiteralPath (Join-Path $workingDirectory $manifest.entities[0].recordsPath) -Raw | ConvertFrom-Json
         Assert-Equal $records.sourceRecordId 'source-1' 'Source record ID should be retained in package record metadata.'
         Assert-Equal $records.data.Title 'A' 'Sanitized record data should be written.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        }
+    }
+}
+
+Run-Test 'Export-DataFabricPackage preserves inferred attachment file extension' {
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-export-file-test-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    try {
+        $packagePath = Join-Path $tempRoot 'migration-package.zip'
+        $workingDirectory = Join-Path $tempRoot 'package'
+        $pngBytes = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52)
+        $fakeInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            if ($command -eq 'login status --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
+            }
+            if ($command -eq 'df entities list --native-only --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = @([pscustomobject]@{ Name = 'Invoice'; DisplayName = 'Invoice'; ID = 'entity-1'; Type = 'Entity'; Source = 'Native' })
+                }
+            }
+            if ($command -eq 'df entities get entity-1 --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = $schema }
+            }
+            if ($command -eq 'df records list entity-1 --limit 100 --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{
+                        Records = @([pscustomobject]@{ Id = 'source-1'; Title = 'A'; Amount = 25; Attachment = 'file-token-without-extension'; Parent = $null })
+                        HasNextPage = $false
+                    }
+                }
+            }
+            if ($command -like 'df files download entity-1 source-1 Attachment --destination * --output json') {
+                $destinationIndex = [Array]::IndexOf($Arguments, '--destination') + 1
+                [System.IO.File]::WriteAllBytes($Arguments[$destinationIndex], $pngBytes)
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ OutputPath = $Arguments[$destinationIndex] } }
+            }
+            throw "Unexpected export file fake CLI command: $command"
+        }
+
+        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $workingDirectory -IncludeFiles -Invoker $fakeInvoker)
+        $manifest = Get-Content -LiteralPath (Join-Path $workingDirectory 'manifest.json') -Raw | ConvertFrom-Json
+        $attachment = @($manifest.attachments)[0]
+
+        Assert-True ($attachment.path -match '\.png$') 'Attachment package path should include the inferred PNG extension.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $workingDirectory $attachment.path)) 'Renamed attachment file should exist in the package.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -810,6 +875,276 @@ Run-Test 'Import-DataFabricPackage creates missing entity and report with fake C
         $report = Get-Content -LiteralPath $result.reportPath -Raw | ConvertFrom-Json
         Assert-Equal $report.entityIdMap.'entity-1' 'dest-entity-1' 'Entity ID map should be written.'
         Assert-Equal $report.recordIdMap.'source-1' 'dest-record-1' 'Record ID map should be written.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        }
+    }
+}
+
+Run-Test 'Import-DataFabricPackage uploads attachments after batch string ID response' {
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-file-test-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    try {
+        $packagePath = Join-Path $tempRoot 'migration-package.zip'
+        $exportDirectory = Join-Path $tempRoot 'package'
+        $importDirectory = Join-Path $tempRoot 'import'
+        $pngBytes = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52)
+
+        $exportInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            if ($command -eq 'login status --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
+            }
+            if ($command -eq 'df entities list --native-only --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = @([pscustomobject]@{ Name = 'Invoice'; DisplayName = 'Invoice'; ID = 'entity-1'; Type = 'Entity'; Source = 'Native' })
+                }
+            }
+            if ($command -eq 'df entities get entity-1 --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = $schema }
+            }
+            if ($command -eq 'df records list entity-1 --limit 100 --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{
+                        Records = @([pscustomobject]@{ Id = 'source-1'; Title = 'A'; Amount = 25; Attachment = 'file-token-without-extension'; Parent = $null })
+                        HasNextPage = $false
+                    }
+                }
+            }
+            if ($command -like 'df files download entity-1 source-1 Attachment --destination * --output json') {
+                $destinationIndex = [Array]::IndexOf($Arguments, '--destination') + 1
+                [System.IO.File]::WriteAllBytes($Arguments[$destinationIndex], $pngBytes)
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ OutputPath = $Arguments[$destinationIndex] } }
+            }
+            throw "Unexpected import file export fake CLI command: $command"
+        }
+
+        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $exportDirectory -IncludeFiles -Invoker $exportInvoker)
+
+        $calls = [System.Collections.Generic.List[string]]::new()
+        $importInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            $calls.Add($command)
+            if ($command -eq 'login status --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
+            }
+            if ($command -eq 'df entities list --native-only --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = @() }
+            }
+            if ($command -like 'df entities create Invoice --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'Invoice'; ID = 'dest-entity-1' } }
+            }
+            if ($command -like 'df records insert dest-entity-1 --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = @('dest-record-1') }
+            }
+            if ($command -like 'df files upload dest-entity-1 dest-record-1 Attachment --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ FileName = 'file-token-without-extension.png' } }
+            }
+            throw "Unexpected import file fake CLI command: $command"
+        }
+
+        $result = Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $importDirectory -IncludeFiles -Invoker $importInvoker
+        $uploadCalls = @($calls | Where-Object { $_ -like 'df files upload *' })
+
+        Assert-Equal $result.uploadedFileCount 1 'One exported attachment should be uploaded after destination record IDs are mapped.'
+        Assert-True ($uploadCalls[0] -match '\.png --output json$') 'Upload should use the extension-preserved package file path.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        }
+    }
+}
+
+Run-Test 'Import-DataFabricPackage inserts attachment records one at a time when batch response omits IDs' {
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-single-file-test-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    try {
+        $packagePath = Join-Path $tempRoot 'migration-package.zip'
+        $exportDirectory = Join-Path $tempRoot 'package'
+        $importDirectory = Join-Path $tempRoot 'import'
+        $pngBytes = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52)
+
+        $exportInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            if ($command -eq 'login status --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
+            }
+            if ($command -eq 'df entities list --native-only --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = @([pscustomobject]@{ Name = 'Invoice'; DisplayName = 'Invoice'; ID = 'entity-1'; Type = 'Entity'; Source = 'Native' })
+                }
+            }
+            if ($command -eq 'df entities get entity-1 --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = $schema }
+            }
+            if ($command -eq 'df records list entity-1 --limit 100 --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{
+                        Records = @(
+                            [pscustomobject]@{ Id = 'source-1'; Title = 'A'; Amount = 25; Attachment = 'file-token-1'; Parent = $null },
+                            [pscustomobject]@{ Id = 'source-2'; Title = 'B'; Amount = 35; Attachment = 'file-token-2'; Parent = $null }
+                        )
+                        HasNextPage = $false
+                    }
+                }
+            }
+            if ($command -like 'df files download entity-1 * Attachment --destination * --output json') {
+                $destinationIndex = [Array]::IndexOf($Arguments, '--destination') + 1
+                [System.IO.File]::WriteAllBytes($Arguments[$destinationIndex], $pngBytes)
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ OutputPath = $Arguments[$destinationIndex] } }
+            }
+            throw "Unexpected single-file export fake CLI command: $command"
+        }
+
+        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $exportDirectory -IncludeFiles -Invoker $exportInvoker)
+
+        $calls = [System.Collections.Generic.List[string]]::new()
+        $importInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            $calls.Add($command)
+            if ($command -eq 'login status --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
+            }
+            if ($command -eq 'df entities list --native-only --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = @() }
+            }
+            if ($command -like 'df entities create Invoice --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'Invoice'; ID = 'dest-entity-1' } }
+            }
+            if ($command -like 'df records insert dest-entity-1 --file * --output json') {
+                $fileIndex = [Array]::IndexOf($Arguments, '--file') + 1
+                $payload = @(Get-Content -LiteralPath $Arguments[$fileIndex] -Raw | ConvertFrom-Json)
+                if ($payload.Count -gt 1) {
+                    return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Inserted = $payload.Count } }
+                }
+
+                $destinationId = if ($payload[0].Title -eq 'A') { 'dest-record-1' } else { 'dest-record-2' }
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Id = $destinationId } }
+            }
+            if ($command -like 'df files upload dest-entity-1 dest-record-* Attachment --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ FileName = 'attachment.png' } }
+            }
+            throw "Unexpected single-file import fake CLI command: $command"
+        }
+
+        $result = Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $importDirectory -IncludeFiles -Invoker $importInvoker
+        $insertCalls = @($calls | Where-Object { $_ -like 'df records insert *' })
+        $uploadCalls = @($calls | Where-Object { $_ -like 'df files upload *' })
+        $report = Get-Content -LiteralPath $result.reportPath -Raw | ConvertFrom-Json
+        $mappedRecordCount = @($report.insertedRecords | Where-Object { -not [string]::IsNullOrWhiteSpace($_.destinationRecordId) }).Count
+
+        Assert-Equal $insertCalls.Count 2 'Attachment-bearing records should be inserted one at a time to capture destination IDs.'
+        Assert-Equal $mappedRecordCount 2 'Single-record inserts should populate destination record IDs in the import report.'
+        Assert-Equal $uploadCalls.Count 2 'Each attachment should be uploaded to its mapped destination record.'
+        Assert-Equal $result.uploadedFileCount 2 'Both exported attachments should be uploaded after single-record insert mapping.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        }
+    }
+}
+
+Run-Test 'Import-DataFabricPackage infers extension for legacy extensionless attachment package' {
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-legacy-file-test-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    try {
+        $packagePath = Join-Path $tempRoot 'migration-package.zip'
+        $exportDirectory = Join-Path $tempRoot 'package'
+        $importDirectory = Join-Path $tempRoot 'import'
+        $pngBytes = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52)
+
+        $exportInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            if ($command -eq 'login status --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
+            }
+            if ($command -eq 'df entities list --native-only --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = @([pscustomobject]@{ Name = 'Invoice'; DisplayName = 'Invoice'; ID = 'entity-1'; Type = 'Entity'; Source = 'Native' })
+                }
+            }
+            if ($command -eq 'df entities get entity-1 --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = $schema }
+            }
+            if ($command -eq 'df records list entity-1 --limit 100 --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{
+                        Records = @([pscustomobject]@{ Id = 'source-1'; Title = 'A'; Amount = 25; Attachment = 'file-token-without-extension'; Parent = $null })
+                        HasNextPage = $false
+                    }
+                }
+            }
+            if ($command -like 'df files download entity-1 source-1 Attachment --destination * --output json') {
+                $destinationIndex = [Array]::IndexOf($Arguments, '--destination') + 1
+                [System.IO.File]::WriteAllBytes($Arguments[$destinationIndex], $pngBytes)
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ OutputPath = $Arguments[$destinationIndex] } }
+            }
+            throw "Unexpected legacy import export fake CLI command: $command"
+        }
+
+        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $exportDirectory -IncludeFiles -Invoker $exportInvoker)
+
+        $manifestPath = Join-Path $exportDirectory 'manifest.json'
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $attachment = @($manifest.attachments)[0]
+        $extensionPath = Join-Path $exportDirectory $attachment.path
+        $extensionlessRelativePath = $attachment.path -replace '\.png$', ''
+        $extensionlessPath = Join-Path $exportDirectory $extensionlessRelativePath
+        Move-Item -LiteralPath $extensionPath -Destination $extensionlessPath
+        $manifest.attachments[0].path = $extensionlessRelativePath
+        $manifest | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        [void](New-DataFabricPackageChecksums -PackageDirectory $exportDirectory)
+        Compress-Archive -Path (Join-Path $exportDirectory '*') -DestinationPath $packagePath -Force
+
+        $calls = [System.Collections.Generic.List[string]]::new()
+        $importInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            $calls.Add($command)
+            if ($command -eq 'login status --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
+            }
+            if ($command -eq 'df entities list --native-only --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = @() }
+            }
+            if ($command -like 'df entities create Invoice --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'Invoice'; ID = 'dest-entity-1' } }
+            }
+            if ($command -like 'df records insert dest-entity-1 --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = @('dest-record-1') }
+            }
+            if ($command -like 'df files upload dest-entity-1 dest-record-1 Attachment --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ FileName = 'file-token-without-extension.png' } }
+            }
+            throw "Unexpected legacy import fake CLI command: $command"
+        }
+
+        $result = Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $importDirectory -IncludeFiles -Invoker $importInvoker
+        $uploadCalls = @($calls | Where-Object { $_ -like 'df files upload *' })
+
+        Assert-Equal $result.uploadedFileCount 1 'Legacy extensionless attachments should still be uploaded.'
+        Assert-True ($uploadCalls[0] -match '\.png --output json$') 'Legacy extensionless package files should be renamed before upload.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {

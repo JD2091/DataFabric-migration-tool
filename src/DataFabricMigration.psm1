@@ -809,7 +809,7 @@ function Get-DataFabricInsertedRecordIds {
         $records = @($data)
     }
     else {
-        foreach ($name in @('Records', 'Items', 'Value')) {
+        foreach ($name in @('Records', 'records', 'Items', 'items', 'Value', 'value', 'Values', 'values', 'Ids', 'ids', 'ID', 'RecordIds', 'recordIds', 'InsertedIds', 'insertedIds')) {
             $items = Get-PropertyValue -InputObject $data -Names @($name)
             if ($null -ne $items) {
                 $records = @($items)
@@ -823,7 +823,12 @@ function Get-DataFabricInsertedRecordIds {
 
     $ids = @()
     foreach ($record in $records) {
-        $id = Get-DataFabricObjectId -InputObject $record
+        $id = if ($record -is [string]) {
+            [string]$record
+        }
+        else {
+            Get-DataFabricObjectId -InputObject $record
+        }
         if ($id) {
             $ids += $id
         }
@@ -960,6 +965,92 @@ function Get-AttachmentFileName {
     }
 
     return ConvertTo-SafeFileName -Name $DefaultName
+}
+
+# Infers a practical file extension from binary signatures when Data Fabric only exposes a file token.
+function Get-FileExtensionFromContent {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return ''
+    }
+
+    $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).Path)
+    try {
+        $buffer = New-Object byte[] 16
+        $read = $stream.Read($buffer, 0, $buffer.Length)
+    }
+    finally {
+        $stream.Dispose()
+    }
+
+    if ($read -ge 8 -and $buffer[0] -eq 0x89 -and $buffer[1] -eq 0x50 -and $buffer[2] -eq 0x4E -and $buffer[3] -eq 0x47 -and $buffer[4] -eq 0x0D -and $buffer[5] -eq 0x0A -and $buffer[6] -eq 0x1A -and $buffer[7] -eq 0x0A) {
+        return '.png'
+    }
+    if ($read -ge 3 -and $buffer[0] -eq 0xFF -and $buffer[1] -eq 0xD8 -and $buffer[2] -eq 0xFF) {
+        return '.jpg'
+    }
+    if ($read -ge 6) {
+        $signature6 = [System.Text.Encoding]::ASCII.GetString($buffer, 0, 6)
+        if ($signature6 -eq 'GIF87a' -or $signature6 -eq 'GIF89a') {
+            return '.gif'
+        }
+    }
+    if ($read -ge 4) {
+        $signature4 = [System.Text.Encoding]::ASCII.GetString($buffer, 0, 4)
+        if ($signature4 -eq '%PDF') {
+            return '.pdf'
+        }
+        if ($signature4 -eq 'PK' + [char]0x03 + [char]0x04) {
+            return '.zip'
+        }
+    }
+    if ($read -ge 2 -and $buffer[0] -eq 0x42 -and $buffer[1] -eq 0x4D) {
+        return '.bmp'
+    }
+    if ($read -ge 12) {
+        $riff = [System.Text.Encoding]::ASCII.GetString($buffer, 0, 4)
+        $webp = [System.Text.Encoding]::ASCII.GetString($buffer, 8, 4)
+        if ($riff -eq 'RIFF' -and $webp -eq 'WEBP') {
+            return '.webp'
+        }
+    }
+
+    return ''
+}
+
+# Adds an inferred extension to an extensionless downloaded attachment and returns the final path.
+function Add-InferredFileExtension {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $Path
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($Path))) {
+        return $Path
+    }
+
+    $extension = Get-FileExtensionFromContent -Path $Path
+    if ([string]::IsNullOrWhiteSpace($extension)) {
+        return $Path
+    }
+
+    $targetPath = "$Path$extension"
+    $counter = 1
+    while (Test-Path -LiteralPath $targetPath) {
+        $targetPath = "{0}-{1}{2}" -f $Path, $counter, $extension
+        $counter++
+    }
+
+    Move-Item -LiteralPath $Path -Destination $targetPath
+    return $targetPath
 }
 
 # Converts an absolute path into a package-relative path.
@@ -1272,6 +1363,8 @@ function Export-DataFabricPackage {
                             try {
                                 $fileArgs = Add-TenantArgument -Arguments @('df', 'files', 'download', $entityId, $exportRecord.sourceRecordId, $fileProperty.Name, '--destination', $attachmentPath, '--output', 'json') -Tenant $Tenant
                                 [void](Invoke-DataFabricCli -Arguments $fileArgs -Invoker $Invoker)
+                                $attachmentPath = Add-InferredFileExtension -Path $attachmentPath
+                                $attachmentRelativePath = Get-RelativePath -BasePath $WorkingDirectory -Path $attachmentPath
                                 Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Export' -Stage 'Files' -Message "Downloaded attachment for $name/$($exportRecord.sourceRecordId): $($fileProperty.Name)" -Data @{
                                     entity = $name
                                     recordId = $exportRecord.sourceRecordId
@@ -1527,16 +1620,29 @@ function Import-DataFabricPackage {
             if ($records.Count -eq 1 -and (Test-PropertyExists -InputObject $records[0] -Name 'sourceRecordId') -eq $false -and $records[0] -is [System.Collections.IEnumerable]) {
                 $records = @($records[0])
             }
+
+            $entityAttachments = @($manifest.attachments | Where-Object { $_.sourceEntityId -eq $entityManifest.sourceEntityId -or $_.entityName -eq $entityName })
+            $requiresDestinationRecordIds = ($IncludeFiles -and $entityAttachments.Count -gt 0) -or ($ImportRelationships -and @($entityManifest.relationshipFields).Count -gt 0)
+            $effectiveBatchSize = if ($requiresDestinationRecordIds) { 1 } else { $BatchSize }
             Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Records' -Message "Preparing to import $($records.Count) record(s) for $entityName." -Data @{
                 entity = $entityName
                 recordCount = $records.Count
-                batchSize = $BatchSize
+                batchSize = $effectiveBatchSize
+                requestedBatchSize = $BatchSize
+                requiresDestinationRecordIds = [bool]$requiresDestinationRecordIds
+            }
+            if ($requiresDestinationRecordIds -and $BatchSize -ne 1) {
+                Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Records' -Message "Using single-record inserts for $entityName so destination record IDs are available for attachments or relationships." -Data @{
+                    entity = $entityName
+                    attachmentCount = $entityAttachments.Count
+                    relationshipFieldCount = @($entityManifest.relationshipFields).Count
+                }
             }
 
-            for ($index = 0; $index -lt $records.Count; $index += $BatchSize) {
-                $batch = @($records[$index..([Math]::Min($index + $BatchSize - 1, $records.Count - 1))])
-                $batchNumber = [Math]::Floor($index / $BatchSize) + 1
-                $batchTotal = [Math]::Ceiling($records.Count / [double]$BatchSize)
+            for ($index = 0; $index -lt $records.Count; $index += $effectiveBatchSize) {
+                $batch = @($records[$index..([Math]::Min($index + $effectiveBatchSize - 1, $records.Count - 1))])
+                $batchNumber = [Math]::Floor($index / $effectiveBatchSize) + 1
+                $batchTotal = [Math]::Ceiling($records.Count / [double]$effectiveBatchSize)
                 $payload = @()
                 foreach ($record in $batch) {
                     $payload += [pscustomobject](ConvertTo-DataFabricImportRecord -ExportRecord $record)
@@ -1705,6 +1811,11 @@ function Import-DataFabricPackage {
             $destinationEntityId = $report.entityIdMap[$attachment.sourceEntityId]
             $destinationRecordId = $report.recordIdMap[$attachment.sourceRecordId]
             $filePath = Join-Path $packageDirectory $attachment.path
+            $uploadRelativePath = $attachment.path
+            if (Test-Path -LiteralPath $filePath) {
+                $filePath = Add-InferredFileExtension -Path $filePath
+                $uploadRelativePath = Get-RelativePath -BasePath $packageDirectory -Path $filePath
+            }
 
             if ([string]::IsNullOrWhiteSpace($destinationEntityId) -or [string]::IsNullOrWhiteSpace($destinationRecordId) -or -not (Test-Path -LiteralPath $filePath)) {
                 $report.skippedItems += [pscustomobject]@{
@@ -1725,14 +1836,14 @@ function Import-DataFabricPackage {
                         sourceRecordId = $attachment.sourceRecordId
                         destinationRecordId = $destinationRecordId
                         field = $attachment.fieldName
-                        path = $attachment.path
+                        path = $uploadRelativePath
                     }
                     $report.uploadedFiles += [pscustomobject]@{
                         entity = $attachment.entityName
                         sourceRecordId = $attachment.sourceRecordId
                         destinationRecordId = $destinationRecordId
                         field = $attachment.fieldName
-                        path = $attachment.path
+                        path = $uploadRelativePath
                     }
                 }
                 catch {
