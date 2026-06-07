@@ -29,7 +29,7 @@ If `uip df` is unavailable, install the Data Fabric CLI tool first:
 uip tools install @uipath/data-fabric-tool
 ```
 
-The utility authenticates with interactive `uip login` before each export or import. For cross-organization migrations, provide the organization logical name and tenant for each phase so `uip login` can target the correct source or destination. Use `-URL` when login must target a non-default UiPath authority/base URL, such as `https://staging.uipath.com`; the script passes this value to the supported `uip login --authority` CLI option.
+The utility authenticates with interactive `uip login` before each export or import. For cross-organization migrations, provide the organization logical name and tenant for each phase so `uip login` can target the correct source or destination. Use `-URL` when login must target a non-default UiPath authority/base URL, such as `https://cloud.uipath.com`; the script passes this value to the supported `uip login --authority` CLI option.
 
 ## Run From PowerShell
 
@@ -45,7 +45,7 @@ Export from a source organization without prompts:
 .\Run-DataFabricMigration.ps1 `
   -NoPrompt `
   -Mode Export `
-  -URL "https://staging.uipath.com" `
+  -URL "https://cloud.uipath.com" `
   -Organization "SourceOrg" `
   -Tenant "SourceTenant" `
   -EntityNames "Customer,Invoice" `
@@ -60,7 +60,7 @@ Import into a destination organization without prompts:
 .\Run-DataFabricMigration.ps1 `
   -NoPrompt `
   -Mode Import `
-  -URL "https://staging.uipath.com" `
+  -URL "https://cloud.uipath.com" `
   -Organization "DestinationOrg" `
   -Tenant "DestinationTenant" `
   -PackagePath .\artifacts\packages\migration-package.zip `
@@ -128,7 +128,7 @@ Export selected entities from a source organization:
 
 ```powershell
 .\scripts\Export-DataFabric.ps1 `
-  -URL "https://staging.uipath.com" `
+  -URL "https://cloud.uipath.com" `
   -Organization "SourceOrg" `
   -Tenant "SourceTenant" `
   -EntityName "Customer","Invoice" `
@@ -153,7 +153,7 @@ Import into a destination organization and upload exported file attachments:
 
 ```powershell
 .\scripts\Import-DataFabric.ps1 `
-  -URL "https://staging.uipath.com" `
+  -URL "https://cloud.uipath.com" `
   -Organization "DestinationOrg" `
   -Tenant "DestinationTenant" `
   -PackagePath .\artifacts\packages\migration-package.zip `
