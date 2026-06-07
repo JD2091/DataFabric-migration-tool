@@ -3,13 +3,11 @@ param(
     [ValidateSet('Export', 'Import')]
     [string]$Mode = $null,
 
-    [string]$Tenant = '',
+    [string]$URL = '',
 
     [string]$Organization = '',
 
-    [string]$ClientId = '',
-
-    [string]$ClientSecret = '',
+    [string]$Tenant = '',
 
     [string]$PackagePath = '',
 
@@ -34,33 +32,6 @@ param(
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
-
-# Converts SecureString prompt output to plain text only at the execution boundary where the CLI needs it.
-function ConvertFrom-InputSecureString {
-    param(
-        [AllowNull()]
-        [object]$Value
-    )
-
-    if ($null -eq $Value) {
-        return $null
-    }
-
-    if ($Value -is [System.Security.SecureString]) {
-        $bstr = [System.IntPtr]::Zero
-        try {
-            $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
-            return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-        }
-        finally {
-            if ($bstr -ne [System.IntPtr]::Zero) {
-                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-            }
-        }
-    }
-
-    return [string]$Value
-}
 
 # Parses user yes/no style input into a Boolean switch value.
 function ConvertTo-BoolOption {
@@ -378,19 +349,6 @@ function Read-TextInput {
     return [string]$value
 }
 
-# Invokes the supplied secure prompt hook and converts the value for CLI login use.
-function Read-SecretInput {
-    param(
-        [Parameter(Mandatory)]
-        [scriptblock]$ReadSecret,
-
-        [Parameter(Mandatory)]
-        [string]$Prompt
-    )
-
-    return ConvertFrom-InputSecureString -Value (& $ReadSecret $Prompt)
-}
-
 # Resolves a text value from parameters or prompts, honoring -NoPrompt.
 function Resolve-TextValue {
     param(
@@ -504,18 +462,6 @@ function Assert-MigrationInputComplete {
     if ([string]::IsNullOrWhiteSpace($MigrationInput.PackagePath)) {
         throw 'Package path is required when -NoPrompt is used.'
     }
-
-    $hasCredentialValue = -not [string]::IsNullOrWhiteSpace($MigrationInput.Organization) -or
-        -not [string]::IsNullOrWhiteSpace($MigrationInput.ClientId) -or
-        -not [string]::IsNullOrWhiteSpace($MigrationInput.ClientSecret)
-
-    if ($hasCredentialValue -and (
-            [string]::IsNullOrWhiteSpace($MigrationInput.Tenant) -or
-            [string]::IsNullOrWhiteSpace($MigrationInput.Organization) -or
-            [string]::IsNullOrWhiteSpace($MigrationInput.ClientId) -or
-            [string]::IsNullOrWhiteSpace($MigrationInput.ClientSecret))) {
-        throw 'Client credential login requires Tenant, Organization, ClientId, and ClientSecret.'
-    }
 }
 
 # Collects and normalizes all user inputs before the migration engine is called.
@@ -527,9 +473,7 @@ function Resolve-MigrationInput {
 
         [string]$Organization = '',
 
-        [string]$ClientId = '',
-
-        [string]$ClientSecret = '',
+        [string]$URL = '',
 
         [string]$PackagePath = '',
 
@@ -551,9 +495,7 @@ function Resolve-MigrationInput {
 
         [switch]$NoPrompt = $false,
 
-        [scriptblock]$ReadText = { param($Prompt) Read-Host -Prompt $Prompt },
-
-        [scriptblock]$ReadSecret = { param($Prompt) Read-Host -Prompt $Prompt -AsSecureString }
+        [scriptblock]$ReadText = { param($Prompt) Read-Host -Prompt $Prompt }
     )
 
     $resolvedMode = Resolve-TextValue -Value $Mode -Prompt 'Migration mode (Export/Import)' -ReadText $ReadText -NoPrompt:$NoPrompt
@@ -571,18 +513,9 @@ function Resolve-MigrationInput {
         $resolvedMode = $normalizedMode
     }
 
-    $resolvedTenant = Resolve-TextValue -Value $Tenant -Prompt 'Tenant name (blank uses current uip login tenant unless client credentials are supplied)' -ReadText $ReadText -NoPrompt:$NoPrompt
-    $resolvedOrganization = Resolve-TextValue -Value $Organization -Prompt 'Organization logical name (blank uses current uip login session)' -ReadText $ReadText -NoPrompt:$NoPrompt
-    $resolvedClientId = Resolve-TextValue -Value $ClientId -Prompt 'Client ID (blank uses current uip login session)' -ReadText $ReadText -NoPrompt:$NoPrompt
-    $resolvedClientSecret = $ClientSecret
-
-    if ([string]::IsNullOrWhiteSpace($resolvedClientSecret) -and -not $NoPrompt -and -not [string]::IsNullOrWhiteSpace($resolvedClientId)) {
-        $resolvedClientSecret = Read-SecretInput -ReadSecret $ReadSecret -Prompt 'Client secret'
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($resolvedClientSecret)) {
-        $resolvedClientSecret = [string]$resolvedClientSecret
-    }
+    $resolvedTenant = Resolve-TextValue -Value $Tenant -Prompt 'Tenant name (blank lets uip login prompt or use its default)' -ReadText $ReadText -NoPrompt:$NoPrompt
+    $resolvedOrganization = Resolve-TextValue -Value $Organization -Prompt 'Organization logical name (blank lets uip login prompt or use its default)' -ReadText $ReadText -NoPrompt:$NoPrompt
+    $resolvedURL = Resolve-TextValue -Value $URL -Prompt 'URL/authority (blank uses the uip CLI default authority)' -ReadText $ReadText -NoPrompt:$NoPrompt
 
     $resolvedPackagePath = Resolve-TextValue -Value $PackagePath -Prompt 'Migration package ZIP path' -ReadText $ReadText -NoPrompt:$NoPrompt
     if ([string]::IsNullOrWhiteSpace($resolvedPackagePath) -and -not $NoPrompt) {
@@ -610,8 +543,7 @@ function Resolve-MigrationInput {
         Mode = $resolvedMode
         Tenant = $resolvedTenant
         Organization = $resolvedOrganization
-        ClientId = $resolvedClientId
-        ClientSecret = $resolvedClientSecret
+        URL = $resolvedURL
         PackagePath = $resolvedPackagePath
         EntityNames = $resolvedEntityNames
         IncludeFiles = [bool]$resolvedIncludeFiles
@@ -635,9 +567,7 @@ function Invoke-DataFabricMigrationRunner {
 
         [string]$Organization = '',
 
-        [string]$ClientId = '',
-
-        [string]$ClientSecret = '',
+        [string]$URL = '',
 
         [string]$PackagePath = '',
 
@@ -682,8 +612,7 @@ function Invoke-DataFabricMigrationRunner {
             -Mode $Mode `
             -Tenant $Tenant `
             -Organization $Organization `
-            -ClientId $ClientId `
-            -ClientSecret $ClientSecret `
+            -URL $URL `
             -PackagePath $PackagePath `
             -EntityNames $EntityNames `
             -IncludeFiles:$IncludeFiles `
@@ -695,7 +624,7 @@ function Invoke-DataFabricMigrationRunner {
             -ProjectDir $projectRoot `
             -NoPrompt:$NoPrompt
 
-        Write-MigrationLogLine -Path $logPathForRun -Message ("Resolved mode: {0}; package: {1}; tenant: {2}; organization: {3}." -f $migrationInput.Mode, $migrationInput.PackagePath, $migrationInput.Tenant, $migrationInput.Organization)
+        Write-MigrationLogLine -Path $logPathForRun -Message ("Resolved mode: {0}; package: {1}; tenant: {2}; organization: {3}; URL: {4}." -f $migrationInput.Mode, $migrationInput.PackagePath, $migrationInput.Tenant, $migrationInput.Organization, $migrationInput.URL)
 
         $progressCallback = {
             param($Event)
@@ -717,11 +646,8 @@ function Invoke-DataFabricMigrationRunner {
             if (-not [string]::IsNullOrWhiteSpace($migrationInput.Organization)) {
                 $arguments.Organization = $migrationInput.Organization
             }
-            if (-not [string]::IsNullOrWhiteSpace($migrationInput.ClientId)) {
-                $arguments.ClientId = $migrationInput.ClientId
-            }
-            if (-not [string]::IsNullOrWhiteSpace($migrationInput.ClientSecret)) {
-                $arguments.ClientSecret = $migrationInput.ClientSecret
+            if (-not [string]::IsNullOrWhiteSpace($migrationInput.URL)) {
+                $arguments.URL = $migrationInput.URL
             }
 
             [string[]]$entityNames = @(ConvertTo-EntityNameArray -Value $migrationInput.EntityNames)
@@ -762,11 +688,8 @@ function Invoke-DataFabricMigrationRunner {
         if (-not [string]::IsNullOrWhiteSpace($migrationInput.Organization)) {
             $arguments.Organization = $migrationInput.Organization
         }
-        if (-not [string]::IsNullOrWhiteSpace($migrationInput.ClientId)) {
-            $arguments.ClientId = $migrationInput.ClientId
-        }
-        if (-not [string]::IsNullOrWhiteSpace($migrationInput.ClientSecret)) {
-            $arguments.ClientSecret = $migrationInput.ClientSecret
+        if (-not [string]::IsNullOrWhiteSpace($migrationInput.URL)) {
+            $arguments.URL = $migrationInput.URL
         }
         if ($migrationInput.IncludeFiles) {
             $arguments.IncludeFiles = $true

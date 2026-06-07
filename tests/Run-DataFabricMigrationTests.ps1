@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 Set-StrictMode -Version 3.0
@@ -147,9 +147,11 @@ Run-Test 'Run script exposes PowerShell-native parameter contract' {
 Run-Test 'Run script assigns explicit defaults to public parameters' {
     $runScript = Get-Content -LiteralPath (Join-Path $projectRoot 'Run-DataFabricMigration.ps1') -Raw
     Assert-True ($runScript -match '\[string\]\$Mode\s*=\s*\$null') 'Mode should default to null so interactive runs still prompt for Export or Import.'
-    foreach ($name in @('Tenant', 'Organization', 'ClientId', 'ClientSecret', 'PackagePath', 'EntityNames', 'ReportPath', 'LogPath')) {
+    foreach ($name in @('Tenant', 'Organization', 'URL', 'PackagePath', 'EntityNames', 'ReportPath', 'LogPath')) {
         Assert-True ($runScript -match "\[string\]\`$$name\s*=\s*''") "$name should default to an empty string."
     }
+    Assert-True (-not ($runScript -match '\[string\]\$ClientId')) 'Runner should not expose ClientId.'
+    Assert-True (-not ($runScript -match '\[string\]\$ClientSecret')) 'Runner should not expose ClientSecret.'
     Assert-True ($runScript -match '\[int\]\$PageSize\s*=\s*100') 'PageSize should default to 100.'
     Assert-True ($runScript -match '\[int\]\$BatchSize\s*=\s*50') 'BatchSize should default to 50.'
     Assert-True ($runScript -match '\[string\]\$ProjectDir\s*=\s*\$PSScriptRoot') 'ProjectDir should default to the script root.'
@@ -160,17 +162,21 @@ Run-Test 'Run script assigns explicit defaults to public parameters' {
 
 Run-Test 'Advanced wrappers assign explicit defaults to public parameters' {
     $exportScript = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\Export-DataFabric.ps1') -Raw
-    foreach ($name in @('PackagePath', 'Tenant', 'Organization', 'ClientId', 'ClientSecret', 'WorkingDirectory')) {
+    foreach ($name in @('PackagePath', 'Tenant', 'Organization', 'URL', 'WorkingDirectory')) {
         Assert-True ($exportScript -match "\[string\]\`$$name\s*=\s*''") "Export wrapper $name should default to an empty string."
     }
+    Assert-True (-not ($exportScript -match '\[string\]\$ClientId')) 'Export wrapper should not expose ClientId.'
+    Assert-True (-not ($exportScript -match '\[string\]\$ClientSecret')) 'Export wrapper should not expose ClientSecret.'
     Assert-True ($exportScript -match '\[string\[\]\]\$EntityName\s*=\s*@\(\)') 'Export wrapper EntityName should default to an empty array.'
     Assert-True ($exportScript -match '\[int\]\$PageSize\s*=\s*100') 'Export wrapper PageSize should default to 100.'
     Assert-True ($exportScript -match '\[switch\]\$IncludeFiles\s*=\s*\$false') 'Export wrapper IncludeFiles should default to false.'
 
     $importScript = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\Import-DataFabric.ps1') -Raw
-    foreach ($name in @('PackagePath', 'Tenant', 'Organization', 'ClientId', 'ClientSecret', 'WorkingDirectory')) {
+    foreach ($name in @('PackagePath', 'Tenant', 'Organization', 'URL', 'WorkingDirectory')) {
         Assert-True ($importScript -match "\[string\]\`$$name\s*=\s*''") "Import wrapper $name should default to an empty string."
     }
+    Assert-True (-not ($importScript -match '\[string\]\$ClientId')) 'Import wrapper should not expose ClientId.'
+    Assert-True (-not ($importScript -match '\[string\]\$ClientSecret')) 'Import wrapper should not expose ClientSecret.'
     Assert-True ($importScript -match '\[int\]\$BatchSize\s*=\s*50') 'Import wrapper BatchSize should default to 50.'
     foreach ($name in @('IncludeFiles', 'ImportRelationships')) {
         Assert-True ($importScript -match "\[switch\]\`$$name\s*=\s*\`$false") "Import wrapper $name should default to false."
@@ -181,25 +187,25 @@ Run-Test 'Run script exposes testable prompt resolution hooks' {
     $runScript = Get-Content -LiteralPath (Join-Path $projectRoot 'Run-DataFabricMigration.ps1') -Raw
     Assert-True ($runScript -match 'function Resolve-MigrationInput') 'Runner should have a testable input resolution function.'
     Assert-True ($runScript -match '\[scriptblock\]\$ReadText') 'Input resolution should accept a text prompt scriptblock.'
-    Assert-True ($runScript -match '\[scriptblock\]\$ReadSecret') 'Input resolution should accept a secret prompt scriptblock.'
-    Assert-True ($runScript -match 'Read-Host[^\r\n]+-AsSecureString') 'Client secrets should be collected with Read-Host -AsSecureString.'
+    Assert-True (-not ($runScript -match '\[scriptblock\]\$ReadSecret')) 'Input resolution should not accept a secret prompt scriptblock.'
+    Assert-True (-not ($runScript -match 'Read-Host[^\r\n]+-AsSecureString')) 'Runner should not collect client secrets.'
 }
 
 Run-Test 'Resolve-MigrationInput accepts mocked interactive prompt values' {
     Import-RunnerFunctionsForTest
     $answers = [System.Collections.Queue]::new()
-    foreach ($answer in @('Export', 'SourceTenant', 'SourceOrg', 'source-client', '.\migration-package.zip', 'Customer,Invoice', 'yes')) {
+    foreach ($answer in @('Export', 'SourceTenant', 'SourceOrg', 'https://staging.uipath.com', '.\migration-package.zip', 'Customer,Invoice', 'yes')) {
         $answers.Enqueue($answer)
     }
-    $secret = ConvertTo-SecureString 'source-secret' -AsPlainText -Force
 
-    $result = Resolve-MigrationInput -ReadText { param($Prompt) $answers.Dequeue() } -ReadSecret { param($Prompt) $secret }
+    $result = Resolve-MigrationInput -ReadText { param($Prompt) $answers.Dequeue() }
 
     Assert-Equal $result.Mode 'Export' 'Mode should be collected from the mocked prompt.'
     Assert-Equal $result.Tenant 'SourceTenant' 'Tenant should be collected from the mocked prompt.'
     Assert-Equal $result.Organization 'SourceOrg' 'Organization should be collected from the mocked prompt.'
-    Assert-Equal $result.ClientId 'source-client' 'Client ID should be collected from the mocked prompt.'
-    Assert-Equal $result.ClientSecret 'source-secret' 'Client secret should be converted from SecureString only for execution.'
+    Assert-Equal $result.URL 'https://staging.uipath.com' 'URL should be collected from the mocked prompt.'
+    Assert-True ($null -eq $result.PSObject.Properties['ClientId']) 'Resolved input should not include ClientId.'
+    Assert-True ($null -eq $result.PSObject.Properties['ClientSecret']) 'Resolved input should not include ClientSecret.'
     Assert-Equal $result.PackagePath '.\migration-package.zip' 'Package path should be collected from the mocked prompt.'
     Assert-Equal $result.EntityNames 'Customer,Invoice' 'Entity names should be collected for export.'
     Assert-True $result.IncludeFiles 'IncludeFiles should parse yes.'
@@ -210,11 +216,11 @@ Run-Test 'Resolve-MigrationInput defaults interactive package path under artifac
     Import-RunnerFunctionsForTest
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-input-test-' + [guid]::NewGuid().ToString('N'))
     $answers = [System.Collections.Queue]::new()
-    foreach ($answer in @('Export', '', '', '', '', '', 'no', '')) {
+    foreach ($answer in @('Export', '', '', '', '', '', 'no')) {
         $answers.Enqueue($answer)
     }
 
-    $result = Resolve-MigrationInput -ProjectDir $tempRoot -ReadText { param($Prompt) $answers.Dequeue() } -ReadSecret { throw 'Secret should not be prompted when ClientId is blank.' }
+    $result = Resolve-MigrationInput -ProjectDir $tempRoot -ReadText { param($Prompt) $answers.Dequeue() }
     $expected = Join-Path (Join-Path $tempRoot 'artifacts\packages') 'migration-package.zip'
     Assert-Equal $result.PackagePath $expected 'Interactive default package path should live under artifacts\packages.'
 }
@@ -240,35 +246,6 @@ Run-Test 'Run script NoPrompt requires mode before execution' {
         $report = Get-Content -LiteralPath $reportPath -Raw
         Assert-True ($report -match 'Data Fabric migration failed\.') 'Failure report should have a clear heading.'
         Assert-True ($report -match 'Mode is required') 'Failure report should explain that Mode is required.'
-    }
-    finally {
-        if (Test-Path -LiteralPath $tempRoot) {
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force
-        }
-    }
-}
-
-Run-Test 'Run script NoPrompt rejects partial client credentials' {
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-runner-test-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-    try {
-        $reportPath = Join-Path $tempRoot 'report.txt'
-        $logPath = Join-Path $tempRoot 'migration.log'
-        $runnerPath = Join-Path $projectRoot 'Run-DataFabricMigration.ps1'
-        $packagePath = Join-Path $tempRoot 'migration-package.zip'
-        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ProjectDir "{1}" -NoPrompt -Mode Export -PackagePath "{2}" -ClientId source-client -ReportPath "{3}" -LogPath "{4}"' -f @(
-            $runnerPath.Replace('"', '""'),
-            $projectRoot.Replace('"', '""'),
-            $packagePath.Replace('"', '""'),
-            $reportPath.Replace('"', '""'),
-            $logPath.Replace('"', '""')
-        )
-
-        $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-
-        Assert-True ($process.ExitCode -ne 0) 'Runner should exit non-zero when client credentials are incomplete.'
-        $report = Get-Content -LiteralPath $reportPath -Raw
-        Assert-True ($report -match 'Client credential login requires Tenant, Organization, ClientId, and ClientSecret') 'Failure report should explain the complete credential requirement.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -470,36 +447,6 @@ Run-Test 'Invoke-UipJson reports stderr when command exits nonzero' {
     }
 }
 
-Run-Test 'Invoke-UipJson redacts client secret in failure messages' {
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-uip-test-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-    $oldPath = $env:PATH
-    try {
-        $commandName = 'fakeuip' + [guid]::NewGuid().ToString('N')
-        $cmdPath = Join-Path $tempRoot "$commandName.cmd"
-
-        Set-Content -LiteralPath $cmdPath -Encoding ASCII -Value @(
-            '@echo off',
-            'echo auth failed 1>&2',
-            'exit /b 1'
-        )
-
-        $env:PATH = "$tempRoot;$oldPath"
-        try {
-            [void](Invoke-UipJson -Command $commandName -Arguments @('login', '--client-id', 'client-one', '--client-secret', 'super-secret-value', '--output', 'json'))
-            throw 'Invoke-UipJson should throw when login exits nonzero.'
-        }
-        catch {
-            Assert-True ($_.Exception.Message -match '--client-secret \*\*\*') 'Failure should redact client secret argument values.'
-            Assert-True (-not ($_.Exception.Message -match 'super-secret-value')) 'Failure should not expose the client secret value.'
-        }
-    }
-    finally {
-        $env:PATH = $oldPath
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
 # Record/schema transformation tests cover the pure helpers that prepare export and import payloads.
 Run-Test 'Remove-DataFabricSystemFields strips readonly fields' {
     $record = [pscustomobject]@{
@@ -654,7 +601,7 @@ Run-Test 'Export-DataFabricPackage creates package manifest with fake CLI respon
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{
                     Result = 'Success'
                     Data = [pscustomobject]@{ Status = 'Logged in'; Organization = 'SourceOrg'; Tenant = 'SourceTenant' }
@@ -735,7 +682,7 @@ Run-Test 'Export-DataFabricPackage preserves inferred attachment file extension'
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -778,7 +725,7 @@ Run-Test 'Export-DataFabricPackage preserves inferred attachment file extension'
     }
 }
 
-Run-Test 'Export-DataFabricPackage logs in with client credentials before source reads' {
+Run-Test 'Export-DataFabricPackage runs interactive login with tenant and organization before source reads' {
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-export-auth-test-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     try {
@@ -790,7 +737,7 @@ Run-Test 'Export-DataFabricPackage logs in with client credentials before source
 
             $command = $Arguments -join ' '
             $calls.Add($command)
-            if ($command -eq 'login --client-id export-client --client-secret export-secret --organization SourceOrg --tenant SourceTenant --output json') {
+            if ($command -eq 'login --organization SourceOrg --tenant SourceTenant --output json') {
                 return [pscustomobject]@{
                     Result = 'Success'
                     Data = [pscustomobject]@{ Status = 'Logged in'; Organization = 'SourceOrg'; Tenant = 'SourceTenant' }
@@ -817,9 +764,59 @@ Run-Test 'Export-DataFabricPackage logs in with client credentials before source
             throw "Unexpected export auth fake CLI command: $command"
         }
 
-        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $workingDirectory -Tenant SourceTenant -Organization SourceOrg -ClientId export-client -ClientSecret export-secret -Invoker $fakeInvoker)
-        Assert-Equal $calls[0] 'login --client-id export-client --client-secret export-secret --organization SourceOrg --tenant SourceTenant --output json' 'Export should log in with source client credentials before Data Fabric reads.'
+        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $workingDirectory -Tenant SourceTenant -Organization SourceOrg -Invoker $fakeInvoker)
+        Assert-Equal $calls[0] 'login --organization SourceOrg --tenant SourceTenant --output json' 'Export should run interactive login with source tenant and organization before Data Fabric reads.'
         Assert-True ($calls[1] -match '^df entities list') 'Export should read entities only after logging in.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        }
+    }
+}
+
+Run-Test 'Export-DataFabricPackage passes URL as login authority' {
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-export-auth-url-test-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    try {
+        $packagePath = Join-Path $tempRoot 'migration-package.zip'
+        $workingDirectory = Join-Path $tempRoot 'package'
+        $calls = [System.Collections.Generic.List[string]]::new()
+        $fakeInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            $calls.Add($command)
+            if ($command -eq 'login --authority https://staging.uipath.com --organization SourceOrg --tenant SourceTenant --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{ Status = 'Logged in'; Organization = 'SourceOrg'; Tenant = 'SourceTenant' }
+                }
+            }
+            if ($command -eq 'df entities list --native-only --output json --tenant SourceTenant') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = @([pscustomobject]@{ Name = 'Invoice'; DisplayName = 'Invoice'; ID = 'entity-1'; Type = 'Entity'; Source = 'Native' })
+                }
+            }
+            if ($command -eq 'df entities get entity-1 --output json --tenant SourceTenant') {
+                return [pscustomobject]@{ Result = 'Success'; Data = $schema }
+            }
+            if ($command -eq 'df records list entity-1 --limit 100 --output json --tenant SourceTenant') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{
+                        Records = @([pscustomobject]@{ Id = 'source-1'; Title = 'A'; Amount = 25; Attachment = $null; Parent = $null })
+                        HasNextPage = $false
+                    }
+                }
+            }
+            throw "Unexpected export auth URL fake CLI command: $command"
+        }
+
+        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $workingDirectory -Tenant SourceTenant -Organization SourceOrg -URL 'https://staging.uipath.com' -Invoker $fakeInvoker)
+        Assert-Equal $calls[0] 'login --authority https://staging.uipath.com --organization SourceOrg --tenant SourceTenant --output json' 'Export should pass URL to interactive uip login as --authority.'
+        Assert-True ($calls[1] -match '^df entities list') 'Export should read entities only after logging in with authority.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -841,7 +838,7 @@ Run-Test 'Import-DataFabricPackage creates missing entity and report with fake C
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -871,7 +868,7 @@ Run-Test 'Import-DataFabricPackage creates missing entity and report with fake C
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -967,7 +964,7 @@ Run-Test 'Import-DataFabricPackage skips choice-set fields from legacy package s
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1031,7 +1028,7 @@ Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped r
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1075,7 +1072,7 @@ Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped r
 
             $command = $Arguments -join ' '
             $calls.Add($command)
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1229,7 +1226,7 @@ Run-Test 'Import-DataFabricPackage reports unresolved inferred relationship targ
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1275,7 +1272,7 @@ Run-Test 'Import-DataFabricPackage uploads attachments after batch string ID res
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1312,7 +1309,7 @@ Run-Test 'Import-DataFabricPackage uploads attachments after batch string ID res
 
             $command = $Arguments -join ' '
             $calls.Add($command)
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1356,7 +1353,7 @@ Run-Test 'Import-DataFabricPackage inserts attachment records one at a time when
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1396,7 +1393,7 @@ Run-Test 'Import-DataFabricPackage inserts attachment records one at a time when
 
             $command = $Arguments -join ' '
             $calls.Add($command)
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1452,7 +1449,7 @@ Run-Test 'Import-DataFabricPackage infers extension for legacy extensionless att
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1501,7 +1498,7 @@ Run-Test 'Import-DataFabricPackage infers extension for legacy extensionless att
 
             $command = $Arguments -join ' '
             $calls.Add($command)
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1532,7 +1529,7 @@ Run-Test 'Import-DataFabricPackage infers extension for legacy extensionless att
     }
 }
 
-Run-Test 'Import-DataFabricPackage logs in with client credentials before destination writes' {
+Run-Test 'Import-DataFabricPackage runs interactive login with tenant and organization before destination writes' {
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-auth-test-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     try {
@@ -1544,7 +1541,7 @@ Run-Test 'Import-DataFabricPackage logs in with client credentials before destin
             param([string[]]$Arguments)
 
             $command = $Arguments -join ' '
-            if ($command -eq 'login status --output json') {
+            if ($command -eq 'login --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
             }
             if ($command -eq 'df entities list --native-only --output json') {
@@ -1576,7 +1573,7 @@ Run-Test 'Import-DataFabricPackage logs in with client credentials before destin
 
             $command = $Arguments -join ' '
             $calls.Add($command)
-            if ($command -eq 'login --client-id import-client --client-secret import-secret --organization DestOrg --tenant DestTenant --output json') {
+            if ($command -eq 'login --organization DestOrg --tenant DestTenant --output json') {
                 return [pscustomobject]@{
                     Result = 'Success'
                     Data = [pscustomobject]@{ Status = 'Logged in'; Organization = 'DestOrg'; Tenant = 'DestTenant' }
@@ -1594,9 +1591,82 @@ Run-Test 'Import-DataFabricPackage logs in with client credentials before destin
             throw "Unexpected import auth fake CLI command: $command"
         }
 
-        [void](Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $importDirectory -Tenant DestTenant -Organization DestOrg -ClientId import-client -ClientSecret import-secret -Invoker $importInvoker)
-        Assert-Equal $calls[0] 'login --client-id import-client --client-secret import-secret --organization DestOrg --tenant DestTenant --output json' 'Import should log in with destination client credentials before Data Fabric writes.'
+        [void](Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $importDirectory -Tenant DestTenant -Organization DestOrg -Invoker $importInvoker)
+        Assert-Equal $calls[0] 'login --organization DestOrg --tenant DestTenant --output json' 'Import should run interactive login with destination tenant and organization before Data Fabric writes.'
         Assert-True ($calls[1] -match '^df entities list') 'Import should read destination entities only after logging in.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        }
+    }
+}
+
+Run-Test 'Import-DataFabricPackage passes URL as login authority' {
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-auth-url-test-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    try {
+        $packagePath = Join-Path $tempRoot 'migration-package.zip'
+        $exportDirectory = Join-Path $tempRoot 'package'
+        $importDirectory = Join-Path $tempRoot 'import'
+
+        $exportInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            if ($command -eq 'login --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
+            }
+            if ($command -eq 'df entities list --native-only --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = @([pscustomobject]@{ Name = 'Invoice'; DisplayName = 'Invoice'; ID = 'entity-1'; Type = 'Entity'; Source = 'Native' })
+                }
+            }
+            if ($command -eq 'df entities get entity-1 --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = $schema }
+            }
+            if ($command -eq 'df records list entity-1 --limit 100 --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{
+                        Records = @([pscustomobject]@{ Id = 'source-1'; Title = 'A'; Amount = 25; Attachment = $null; Parent = $null })
+                        HasNextPage = $false
+                    }
+                }
+            }
+            throw "Unexpected export fake CLI command: $command"
+        }
+
+        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $exportDirectory -Invoker $exportInvoker)
+
+        $calls = [System.Collections.Generic.List[string]]::new()
+        $importInvoker = {
+            param([string[]]$Arguments)
+
+            $command = $Arguments -join ' '
+            $calls.Add($command)
+            if ($command -eq 'login --authority https://staging.uipath.com --organization DestOrg --tenant DestTenant --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{ Status = 'Logged in'; Organization = 'DestOrg'; Tenant = 'DestTenant' }
+                }
+            }
+            if ($command -eq 'df entities list --native-only --output json --tenant DestTenant') {
+                return [pscustomobject]@{ Result = 'Success'; Data = @() }
+            }
+            if ($command -like 'df entities create Invoice --file * --output json --tenant DestTenant') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'Invoice'; ID = 'dest-entity-1' } }
+            }
+            if ($command -like 'df records insert dest-entity-1 --file * --output json --tenant DestTenant') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Id = 'dest-record-1'; Title = 'A' } }
+            }
+            throw "Unexpected import auth URL fake CLI command: $command"
+        }
+
+        [void](Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $importDirectory -Tenant DestTenant -Organization DestOrg -URL 'https://staging.uipath.com' -Invoker $importInvoker)
+        Assert-Equal $calls[0] 'login --authority https://staging.uipath.com --organization DestOrg --tenant DestTenant --output json' 'Import should pass URL to interactive uip login as --authority.'
+        Assert-True ($calls[1] -match '^df entities list') 'Import should read destination entities only after logging in with authority.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -1614,3 +1684,4 @@ if ($script:Failures.Count -gt 0) {
 
 Write-Host ''
 Write-Host 'All Data Fabric migration tests passed.'
+

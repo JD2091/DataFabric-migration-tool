@@ -199,34 +199,14 @@ function Resolve-UipCommandPath {
     throw "Command '$Command' was found but no invokable path could be resolved."
 }
 
-# Builds a redacted command string for error messages so client secrets are not leaked.
+# Builds the command string used in error messages.
 function Format-UipCommandForError {
     param(
         [Parameter(Mandatory)]
         [string[]]$Arguments
     )
 
-    $safeArguments = @()
-    $redactNext = $false
-    foreach ($argument in $Arguments) {
-        if ($redactNext) {
-            $safeArguments += '***'
-            $redactNext = $false
-            continue
-        }
-
-        if ($argument -match '^(--client-secret=)(.*)$') {
-            $safeArguments += ($Matches[1] + '***')
-            continue
-        }
-
-        $safeArguments += $argument
-        if ($argument -eq '--client-secret') {
-            $redactNext = $true
-        }
-    }
-
-    return "uip $($safeArguments -join ' ')"
+    return "uip $($Arguments -join ' ')"
 }
 
 # Runs uip with safe argument passing, captures stdout/stderr separately, and parses JSON output.
@@ -284,40 +264,32 @@ function Invoke-UipJson {
     }
 }
 
-# Builds login arguments for current-session login or client-credential login.
+# Builds login arguments for interactive uip login.
 function New-DataFabricLoginArguments {
     param(
         [string]$Tenant,
 
         [string]$Organization,
 
-        [string]$ClientId,
-
-        [string]$ClientSecret
+        [string]$URL
     )
 
-    $hasClientId = -not [string]::IsNullOrWhiteSpace($ClientId)
-    $hasClientSecret = -not [string]::IsNullOrWhiteSpace($ClientSecret)
     $hasOrganization = -not [string]::IsNullOrWhiteSpace($Organization)
+    $hasURL = -not [string]::IsNullOrWhiteSpace($URL)
 
-    if (-not $hasClientId -and -not $hasClientSecret -and -not $hasOrganization) {
-        return @('login', 'status', '--output', 'json')
+    $arguments = @('login')
+    if ($hasURL) {
+        $arguments += @('--authority', $URL.Trim())
     }
-
-    if (-not $hasClientId -or -not $hasClientSecret) {
-        throw 'Client ID and client secret are both required for client credential login.'
-    }
-
-    if ([string]::IsNullOrWhiteSpace($Tenant)) {
-        throw 'Tenant is required for client credential login.'
-    }
-
-    $arguments = @('login', '--client-id', $ClientId.Trim(), '--client-secret', $ClientSecret)
     if ($hasOrganization) {
         $arguments += @('--organization', $Organization.Trim())
     }
 
-    $arguments += @('--tenant', $Tenant.Trim(), '--output', 'json')
+    if (-not [string]::IsNullOrWhiteSpace($Tenant)) {
+        $arguments += @('--tenant', $Tenant.Trim())
+    }
+
+    $arguments += @('--output', 'json')
     return $arguments
 }
 
@@ -328,14 +300,12 @@ function Invoke-DataFabricLogin {
 
         [string]$Organization,
 
-        [string]$ClientId,
-
-        [string]$ClientSecret,
+        [string]$URL,
 
         [scriptblock]$Invoker
     )
 
-    $loginArguments = New-DataFabricLoginArguments -Tenant $Tenant -Organization $Organization -ClientId $ClientId -ClientSecret $ClientSecret
+    $loginArguments = New-DataFabricLoginArguments -Tenant $Tenant -Organization $Organization -URL $URL
     return Invoke-DataFabricCli -Arguments $loginArguments -Invoker $Invoker
 }
 
@@ -1732,9 +1702,7 @@ function Export-DataFabricPackage {
 
         [string]$Organization,
 
-        [string]$ClientId,
-
-        [string]$ClientSecret,
+        [string]$URL,
 
         [string[]]$EntityName,
 
@@ -1775,8 +1743,8 @@ function Export-DataFabricPackage {
         selectedEntities = @($EntityName)
     }
 
-    $login = Invoke-DataFabricLogin -Tenant $Tenant -Organization $Organization -ClientId $ClientId -ClientSecret $ClientSecret -Invoker $Invoker
-    Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Export' -Stage 'Authentication' -Message 'Authentication ready for source tenant.' -Detail "Tenant=$Tenant; Organization=$Organization"
+    $login = Invoke-DataFabricLogin -Tenant $Tenant -Organization $Organization -URL $URL -Invoker $Invoker
+    Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Export' -Stage 'Authentication' -Message 'Authentication ready for source tenant.' -Detail "Tenant=$Tenant; Organization=$Organization; URL=$URL"
 
     $entitiesArgs = Add-TenantArgument -Arguments @('df', 'entities', 'list', '--native-only', '--output', 'json') -Tenant $Tenant
     Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Export' -Stage 'Discovery' -Message 'Listing native entity candidates.'
@@ -2064,9 +2032,7 @@ function Import-DataFabricPackage {
 
         [string]$Organization,
 
-        [string]$ClientId,
-
-        [string]$ClientSecret,
+        [string]$URL,
 
         [string]$WorkingDirectory,
 
@@ -2107,8 +2073,8 @@ function Import-DataFabricPackage {
     Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Package' -Message 'Package checksum validation passed.'
 
     $manifest = Get-DataFabricManifest -PackageDirectory $packageDirectory
-    [void](Invoke-DataFabricLogin -Tenant $Tenant -Organization $Organization -ClientId $ClientId -ClientSecret $ClientSecret -Invoker $Invoker)
-    Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Authentication' -Message 'Authentication ready for destination tenant.' -Detail "Tenant=$Tenant; Organization=$Organization"
+    [void](Invoke-DataFabricLogin -Tenant $Tenant -Organization $Organization -URL $URL -Invoker $Invoker)
+    Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Authentication' -Message 'Authentication ready for destination tenant.' -Detail "Tenant=$Tenant; Organization=$Organization; URL=$URL"
 
     Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Discovery' -Message 'Listing destination native entities.'
     $destinationEntitiesResponse = Invoke-DataFabricCli -Arguments (Add-TenantArgument -Arguments @('df', 'entities', 'list', '--native-only', '--output', 'json') -Tenant $Tenant) -Invoker $Invoker

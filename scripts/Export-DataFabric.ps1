@@ -6,9 +6,7 @@ param(
 
     [string]$Organization = '',
 
-    [string]$ClientId = '',
-
-    [string]$ClientSecret = '',
+    [string]$URL = '',
 
     [string[]]$EntityName = @(),
 
@@ -39,11 +37,8 @@ if ($Tenant) {
 if ($Organization) {
     $arguments.Organization = $Organization
 }
-if ($ClientId) {
-    $arguments.ClientId = $ClientId
-}
-if ($ClientSecret) {
-    $arguments.ClientSecret = $ClientSecret
+if ($URL) {
+    $arguments.URL = $URL
 }
 if ($EntityName) {
     $arguments.EntityName = $EntityName

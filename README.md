@@ -19,7 +19,7 @@ The primary entrypoint is `Run-DataFabricMigration.ps1`. It prompts for missing 
 ## Prerequisites
 
 ```powershell
-uip login status --output json
+uip login --output json
 uip df entities list --native-only --output json
 ```
 
@@ -29,7 +29,7 @@ If `uip df` is unavailable, install the Data Fabric CLI tool first:
 uip tools install @uipath/data-fabric-tool
 ```
 
-If client credentials are not supplied, the utility uses the current `uip login` session. For cross-organization migrations, provide the organization logical name, tenant, client ID, and client secret for each phase. Export should use source organization credentials. Import should use destination organization credentials.
+The utility authenticates with interactive `uip login` before each export or import. For cross-organization migrations, provide the organization logical name and tenant for each phase so `uip login` can target the correct source or destination. Use `-URL` when login must target a non-default UiPath authority/base URL, such as `https://staging.uipath.com`; the script passes this value to the supported `uip login --authority` CLI option.
 
 ## Run From PowerShell
 
@@ -45,10 +45,9 @@ Export from a source organization without prompts:
 .\Run-DataFabricMigration.ps1 `
   -NoPrompt `
   -Mode Export `
+  -URL "https://staging.uipath.com" `
   -Organization "SourceOrg" `
   -Tenant "SourceTenant" `
-  -ClientId "SourceExternalAppId" `
-  -ClientSecret "SourceExternalAppSecret" `
   -EntityNames "Customer,Invoice" `
   -PackagePath .\artifacts\packages\migration-package.zip `
   -IncludeFiles `
@@ -61,10 +60,9 @@ Import into a destination organization without prompts:
 .\Run-DataFabricMigration.ps1 `
   -NoPrompt `
   -Mode Import `
+  -URL "https://staging.uipath.com" `
   -Organization "DestinationOrg" `
   -Tenant "DestinationTenant" `
-  -ClientId "DestinationExternalAppId" `
-  -ClientSecret "DestinationExternalAppSecret" `
   -PackagePath .\artifacts\packages\migration-package.zip `
   -IncludeFiles `
   -ImportRelationships `
@@ -86,9 +84,9 @@ Write detailed progress logs to a specific file:
 ## Input Behavior
 
 - `-Mode` accepts `Export` or `Import`.
-- `-Tenant`, `-Organization`, `-ClientId`, and `-ClientSecret` are optional only when using the current `uip login` session.
-- If any client credential value is supplied, all four values are required: tenant, organization, client ID, and client secret.
-- Prompted client secrets are read with `Read-Host -AsSecureString` and converted only for the `uip login` call.
+- `-Tenant`, `-Organization`, and `-URL` are optional `uip login` hints.
+- The tool always calls interactive `uip login`; it does not accept client ID, client secret, or scope parameters.
+- `-URL` is translated internally to `uip login --authority <URL>`; the installed `uip` CLI does not expose a `--URL` flag.
 - `-NoPrompt` throws on missing required values instead of asking.
 - `-ReportPath` writes the final short success or failure report.
 - If `-PackagePath` is omitted during interactive use, the package defaults to `.\artifacts\packages\migration-package.zip`.
@@ -130,10 +128,9 @@ Export selected entities from a source organization:
 
 ```powershell
 .\scripts\Export-DataFabric.ps1 `
+  -URL "https://staging.uipath.com" `
   -Organization "SourceOrg" `
   -Tenant "SourceTenant" `
-  -ClientId "SourceExternalAppId" `
-  -ClientSecret "SourceExternalAppSecret" `
   -EntityName "Customer","Invoice" `
   -PackagePath .\artifacts\packages\migration-package.zip
 ```
@@ -156,10 +153,9 @@ Import into a destination organization and upload exported file attachments:
 
 ```powershell
 .\scripts\Import-DataFabric.ps1 `
+  -URL "https://staging.uipath.com" `
   -Organization "DestinationOrg" `
   -Tenant "DestinationTenant" `
-  -ClientId "DestinationExternalAppId" `
-  -ClientSecret "DestinationExternalAppSecret" `
   -PackagePath .\artifacts\packages\migration-package.zip `
   -IncludeFiles
 ```
