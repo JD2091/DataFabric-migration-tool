@@ -189,10 +189,18 @@ The ZIP contains:
 - System fields are removed from record insert payloads: `Id`, `CreatedBy`, `CreateTime`, `UpdatedBy`, `UpdateTime`.
 - Choice set fields are not supported. Fields of type `CHOICE_SET_SINGLE` and `CHOICE_SET_MULTIPLE`, including their record values, are skipped during export and import because the current `uip df` CLI does not expose the choice set definitions/options required to recreate them.
 - Destination entities are matched by entity name. Existing entities are reused; missing entities are created.
-- Records are inserted in batches. Source-to-destination record ID mappings are written to `import-report.json`.
-- File attachments upload after records exist and can be mapped.
-- Relationship fields and values are preserved only when `-ImportRelationships` is specified. The importer creates missing compatible relationship fields after all destination entities exist, inserts records with destination ID mapping enabled, then updates relationship values using destination record IDs.
+- Records are inserted in batches using `-BatchSize` unless that entity needs source-to-destination record ID mapping for file attachments or relationship updates.
+- File attachments upload after records exist and can be mapped. Only entities with exported attachments fall back to single-record inserts when `-IncludeFiles` is used.
+- Relationship fields and values are preserved only when `-ImportRelationships` is specified. The importer creates missing compatible relationship fields after all destination entities exist, uses single-record inserts only for relationship owner/target entities that need ID mapping, then updates relationship values using destination record IDs.
 - Failures are collected in reports; one failed entity, batch, file, or relationship does not stop the whole import.
+
+## Performance Notes
+
+- Increase `-PageSize` during export to reduce record-list calls.
+- Increase `-BatchSize` during import for entities that do not need file or relationship ID mapping.
+- Avoid `-IncludeFiles` unless file-field attachments are in scope.
+- Avoid `-ImportRelationships` unless relationship fields and values must be preserved.
+- File transfers remain sequential to avoid throttling and retry complexity.
 
 ## Test
 

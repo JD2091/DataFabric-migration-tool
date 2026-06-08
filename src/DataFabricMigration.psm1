@@ -1372,6 +1372,137 @@ function Resolve-DataFabricManifestRelationshipTargets {
     return $unresolved
 }
 
+function Add-DataFabricRecordIdMappingRequirement {
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Requirements,
+
+        [AllowNull()]
+        [string]$EntityName,
+
+        [Parameter(Mandatory)]
+        [string]$Reason
+    )
+
+    if ([string]::IsNullOrWhiteSpace($EntityName)) {
+        return
+    }
+
+    if (-not $Requirements.Contains($EntityName)) {
+        $Requirements[$EntityName] = [ordered]@{}
+    }
+
+    $Requirements[$EntityName][$Reason] = $true
+}
+
+function Get-DataFabricRecordIdMappingRequirements {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$EntityManifests,
+
+        [Parameter(Mandatory)]
+        [object]$Manifest,
+
+        [Parameter(Mandatory)]
+        [string]$PackageDirectory,
+
+        [switch]$IncludeFiles,
+
+        [switch]$ImportRelationships
+    )
+
+    $requirements = @{}
+    $entityNameBySourceId = @{}
+    foreach ($entityManifest in @($EntityManifests)) {
+        $entityName = Get-PropertyValue -InputObject $entityManifest -Names @('name', 'Name')
+        $sourceEntityId = Get-PropertyValue -InputObject $entityManifest -Names @('sourceEntityId', 'SourceEntityId')
+        if (-not [string]::IsNullOrWhiteSpace($sourceEntityId) -and -not [string]::IsNullOrWhiteSpace($entityName)) {
+            $entityNameBySourceId[$sourceEntityId] = $entityName
+        }
+    }
+
+    if ($IncludeFiles) {
+        $attachments = @(Get-PropertyValue -InputObject $Manifest -Names @('attachments', 'Attachments'))
+        foreach ($attachment in $attachments) {
+            $attachmentEntityName = Get-PropertyValue -InputObject $attachment -Names @('entityName', 'EntityName')
+            if ([string]::IsNullOrWhiteSpace($attachmentEntityName)) {
+                $attachmentSourceEntityId = Get-PropertyValue -InputObject $attachment -Names @('sourceEntityId', 'SourceEntityId')
+                if (-not [string]::IsNullOrWhiteSpace($attachmentSourceEntityId) -and $entityNameBySourceId.Contains($attachmentSourceEntityId)) {
+                    $attachmentEntityName = $entityNameBySourceId[$attachmentSourceEntityId]
+                }
+            }
+
+            Add-DataFabricRecordIdMappingRequirement -Requirements $requirements -EntityName $attachmentEntityName -Reason 'file attachment mapping'
+        }
+    }
+
+    if (-not $ImportRelationships) {
+        return $requirements
+    }
+
+    $sourceRecordEntityIndex = Get-DataFabricPackageRecordEntityIndex -EntityManifests $EntityManifests -PackageDirectory $PackageDirectory
+    foreach ($entityManifest in @($EntityManifests)) {
+        $entityName = Get-PropertyValue -InputObject $entityManifest -Names @('name', 'Name')
+        $definitions = @(Get-DataFabricManifestRelationshipDefinitions -EntityManifest $entityManifest)
+        if ($definitions.Count -eq 0) {
+            continue
+        }
+
+        $recordsPath = Get-PropertyValue -InputObject $entityManifest -Names @('recordsPath', 'RecordsPath')
+        if ([string]::IsNullOrWhiteSpace($recordsPath)) {
+            continue
+        }
+
+        $fullRecordsPath = Join-Path $PackageDirectory $recordsPath
+        if (-not (Test-Path -LiteralPath $fullRecordsPath)) {
+            continue
+        }
+
+        foreach ($record in (ConvertTo-DataFabricRecordList -Records (Import-JsonFile -Path $fullRecordsPath))) {
+            $relationships = Get-PropertyValue -InputObject $record -Names @('relationships')
+            if ($null -eq $relationships) {
+                continue
+            }
+
+            foreach ($definition in $definitions) {
+                $fieldName = Get-PropertyValue -InputObject $definition -Names @('fieldName', 'FieldName', 'Name')
+                if ([string]::IsNullOrWhiteSpace($fieldName)) {
+                    continue
+                }
+
+                $relationshipValue = Get-PropertyValue -InputObject $relationships -Names @($fieldName)
+                $sourceIds = @(Get-DataFabricRelationshipSourceIds -Value $relationshipValue)
+                if ($sourceIds.Count -eq 0) {
+                    continue
+                }
+
+                Add-DataFabricRecordIdMappingRequirement -Requirements $requirements -EntityName $entityName -Reason 'relationship mapping'
+                foreach ($sourceId in $sourceIds) {
+                    if ($sourceRecordEntityIndex.Contains($sourceId)) {
+                        Add-DataFabricRecordIdMappingRequirement -Requirements $requirements -EntityName $sourceRecordEntityIndex[$sourceId] -Reason 'relationship mapping'
+                    }
+                }
+            }
+        }
+    }
+
+    return $requirements
+}
+
+function Format-DataFabricRecordImportModeReason {
+    param(
+        [AllowNull()]
+        [object[]]$Reasons
+    )
+
+    $reasonList = @($Reasons | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($reasonList.Count -eq 0) {
+        return 'batch mode: no destination record IDs required'
+    }
+
+    return "single-record mode: required for $([string]::Join(' and ', $reasonList))"
+}
+
 # Converts source relationship values to destination IDs using the record ID map.
 function ConvertTo-DataFabricMappedRelationshipValue {
     param(
@@ -2110,6 +2241,7 @@ function Import-DataFabricPackage {
 
     $entityManifests = @($manifest.entities)
     [void](Resolve-DataFabricManifestRelationshipTargets -EntityManifests $entityManifests -PackageDirectory $packageDirectory)
+    $recordIdMappingRequirements = Get-DataFabricRecordIdMappingRequirements -EntityManifests $entityManifests -Manifest $manifest -PackageDirectory $packageDirectory -IncludeFiles:$IncludeFiles -ImportRelationships:$ImportRelationships
     $choiceSetFieldsByEntityName = @{}
     $createBodyPathByEntityName = @{}
     foreach ($entityManifest in $entityManifests) {
@@ -2360,21 +2492,29 @@ function Import-DataFabricPackage {
                 $unsupportedFieldNames = @($choiceSetFieldsByEntityName[$entityName]) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
             }
             $entityAttachments = @($manifest.attachments | Where-Object { $_.sourceEntityId -eq $entityManifest.sourceEntityId -or $_.entityName -eq $entityName })
-            $requiresDestinationRecordIds = $ImportRelationships -or ($IncludeFiles -and $entityAttachments.Count -gt 0)
+            $recordIdMappingReasons = @()
+            if ($recordIdMappingRequirements.ContainsKey($entityName)) {
+                $recordIdMappingReasons = @($recordIdMappingRequirements[$entityName].Keys)
+            }
+            $requiresDestinationRecordIds = $recordIdMappingReasons.Count -gt 0
             $effectiveBatchSize = if ($requiresDestinationRecordIds) { 1 } else { $BatchSize }
+            $recordImportModeReason = Format-DataFabricRecordImportModeReason -Reasons $recordIdMappingReasons
             Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Records' -Message "Preparing to import $($records.Count) record(s) for $entityName." -Data @{
                 entity = $entityName
                 recordCount = $records.Count
                 batchSize = $effectiveBatchSize
                 requestedBatchSize = $BatchSize
                 requiresDestinationRecordIds = [bool]$requiresDestinationRecordIds
+                recordIdMappingReasons = $recordIdMappingReasons
+                importModeReason = $recordImportModeReason
             }
-            if ($requiresDestinationRecordIds -and $BatchSize -ne 1) {
-                Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Records' -Message "Using single-record inserts for $entityName so destination record IDs are available for attachments or relationships." -Data @{
-                    entity = $entityName
-                    attachmentCount = $entityAttachments.Count
-                    relationshipFieldCount = @($entityManifest.relationshipFields).Count
-                }
+            Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Records' -Message "Record import mode for ${entityName}: $recordImportModeReason." -Data @{
+                entity = $entityName
+                batchSize = $effectiveBatchSize
+                requestedBatchSize = $BatchSize
+                attachmentCount = $entityAttachments.Count
+                relationshipFieldCount = @($entityManifest.relationshipFields).Count
+                recordIdMappingReasons = $recordIdMappingReasons
             }
 
             for ($index = 0; $index -lt $records.Count; $index += $effectiveBatchSize) {

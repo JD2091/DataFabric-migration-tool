@@ -1014,6 +1014,14 @@ Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped r
                 [pscustomobject]@{ Name = 'Name'; DisplayName = 'Name'; Type = 'STRING'; Required = $true; System = $false }
             )
         }
+        $courseSchema = [pscustomobject]@{
+            Name = 'schoolCourse'
+            DisplayName = 'School Course'
+            Fields = @(
+                [pscustomobject]@{ Name = 'Id'; DisplayName = 'Id'; Type = 'UUID'; Required = $true; System = $true },
+                [pscustomobject]@{ Name = 'Title'; DisplayName = 'Title'; Type = 'STRING'; Required = $true; System = $false }
+            )
+        }
         $marksheetSchema = [pscustomobject]@{
             Name = 'schoolmarksheet'
             DisplayName = 'School Marksheet'
@@ -1036,7 +1044,8 @@ Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped r
                     Result = 'Success'
                     Data = @(
                         [pscustomobject]@{ Name = 'schoolStudent'; DisplayName = 'School Student'; ID = 'source-student-entity'; Type = 'Entity'; Source = 'Native' },
-                        [pscustomobject]@{ Name = 'schoolmarksheet'; DisplayName = 'School Marksheet'; ID = 'source-marksheet-entity'; Type = 'Entity'; Source = 'Native' }
+                        [pscustomobject]@{ Name = 'schoolmarksheet'; DisplayName = 'School Marksheet'; ID = 'source-marksheet-entity'; Type = 'Entity'; Source = 'Native' },
+                        [pscustomobject]@{ Name = 'schoolCourse'; DisplayName = 'School Course'; ID = 'source-course-entity'; Type = 'Entity'; Source = 'Native' }
                     )
                 }
             }
@@ -1046,11 +1055,26 @@ Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped r
             if ($command -eq 'df entities get source-marksheet-entity --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = $marksheetSchema }
             }
+            if ($command -eq 'df entities get source-course-entity --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = $courseSchema }
+            }
             if ($command -eq 'df records list source-student-entity --limit 100 --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Records = @([pscustomobject]@{ Id = 'source-student-1'; Name = 'Asha' }); HasNextPage = $false } }
             }
             if ($command -eq 'df records list source-marksheet-entity --limit 100 --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Records = @([pscustomobject]@{ Id = 'source-marksheet-1'; Score = 95; Student = 'source-student-1' }); HasNextPage = $false } }
+            }
+            if ($command -eq 'df records list source-course-entity --limit 100 --output json') {
+                return [pscustomobject]@{
+                    Result = 'Success'
+                    Data = [pscustomobject]@{
+                        Records = @(
+                            [pscustomobject]@{ Id = 'source-course-1'; Title = 'Math' },
+                            [pscustomobject]@{ Id = 'source-course-2'; Title = 'Science' }
+                        )
+                        HasNextPage = $false
+                    }
+                }
             }
             throw "Unexpected relationship export fake CLI command: $command"
         }
@@ -1083,6 +1107,9 @@ Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped r
             }
             if ($command -like 'df entities create schoolmarksheet --file * --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolmarksheet'; ID = 'dest-marksheet-entity' } }
+            }
+            if ($command -like 'df entities create schoolCourse --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolCourse'; ID = 'dest-course-entity' } }
             }
             if ($command -eq 'df entities get dest-student-entity --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolStudent'; Fields = @([pscustomobject]@{ Name = 'Name'; Type = 'STRING'; Required = $true; System = $false }) } }
@@ -1120,6 +1147,12 @@ Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped r
             if ($command -like 'df records insert dest-marksheet-entity --file * --output json') {
                 return [pscustomobject]@{ Result = 'Success'; Data = @('dest-marksheet-1') }
             }
+            if ($command -like 'df records insert dest-course-entity --file * --output json') {
+                $fileIndex = [Array]::IndexOf($Arguments, '--file') + 1
+                $payload = @(Get-Content -LiteralPath $Arguments[$fileIndex] -Raw | ConvertFrom-Json)
+                Assert-Equal $payload.Count 2 'Unrelated entities should still use batch inserts when -ImportRelationships is enabled.'
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Inserted = $payload.Count } }
+            }
             if ($command -like 'df records update dest-marksheet-entity --file * --output json') {
                 $fileIndex = [Array]::IndexOf($Arguments, '--file') + 1
                 $body = Get-Content -LiteralPath $Arguments[$fileIndex] -Raw | ConvertFrom-Json
@@ -1134,11 +1167,13 @@ Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped r
         $relationshipFieldAdds = @($calls | Where-Object { $_ -like '*add-Student.json*' })
         $relationshipFieldRestores = @($calls | Where-Object { $_ -like '*restore-Student.json*' })
         $relationshipRecordUpdates = @($calls | Where-Object { $_ -like 'df records update dest-marksheet-entity *' })
+        $courseInserts = @($calls | Where-Object { $_ -like 'df records insert dest-course-entity *' })
         $report = Get-Content -LiteralPath $result.reportPath -Raw | ConvertFrom-Json
 
         Assert-Equal $relationshipFieldAdds.Count 1 'Import should add the missing relationship field before relationship record updates.'
         Assert-Equal $relationshipFieldRestores.Count 1 'Import should restore the required relationship flag after relationship record updates.'
         Assert-Equal $relationshipRecordUpdates.Count 1 'Import should update the relationship value after records are mapped.'
+        Assert-Equal $courseInserts.Count 1 'Unrelated entities should not be forced into single-record inserts by -ImportRelationships.'
         Assert-Equal @($report.relationshipFieldsAdded).Count 1 'Import report should record added relationship fields.'
         Assert-Equal @($report.relationshipFieldsRestored).Count 1 'Import report should record restored relationship fields.'
         Assert-Equal @($report.relationshipUpdates).Count 1 'Import report should record relationship value updates.'
