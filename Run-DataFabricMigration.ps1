@@ -1,3 +1,90 @@
+<#
+.SYNOPSIS
+Exports or imports UiPath Data Fabric native entities through a portable migration package.
+
+.DESCRIPTION
+Run-DataFabricMigration.ps1 is the main runner for the Data Fabric migration tool. It collects
+missing inputs from the console unless -NoPrompt is supplied, resolves artifact paths under the
+project directory, imports src\DataFabricMigration.psm1, authenticates with uip, runs export or
+import, streams progress, and writes a short report plus detailed logs.
+
+Export flow:
+1. Collect source tenant and package options.
+2. Resolve the package, working, log, and report paths.
+3. Import the migration module and authenticate to the source tenant.
+4. Export selected native entity schemas, create bodies, records, relationship metadata, optional
+   file attachments, and checksums.
+5. Compress the migration package ZIP and write the export report.
+
+Import flow:
+1. Collect destination tenant and package options.
+2. Resolve the package, working, log, and report paths.
+3. Import the migration module and authenticate to the destination tenant.
+4. Expand and validate the package checksums.
+5. Create or reuse base entities without relationship fields in the first entity create body.
+6. Insert scalar record values. Relationship fields and values are reported as skipped because
+   current uip df schema output does not expose related entity/display-field metadata.
+7. Optionally upload file attachments and write import-report.json plus the runner report.
+
+.PARAMETER Mode
+Execution mode: Export or Import. If omitted, the runner prompts in interactive mode.
+
+.PARAMETER URL
+Optional UiPath authority passed to uip login --authority, such as https://cloud.uipath.com.
+
+.PARAMETER Organization
+Optional UiPath organization logical name passed to uip login.
+
+.PARAMETER Tenant
+Optional UiPath tenant name passed to uip login and uip df commands.
+
+.PARAMETER PackagePath
+Path to the migration package ZIP. If omitted, the runner uses artifacts\packages\migration-package.zip.
+
+.PARAMETER EntityNames
+Comma-separated entity names for export. Leave blank to export all migratable native entities.
+
+.PARAMETER IncludeFiles
+Downloads file-field attachments during export or uploads exported attachments during import.
+
+.PARAMETER PageSize
+Record page size used during export.
+
+.PARAMETER BatchSize
+Record batch size used during import when single-record inserts are not required for ID mapping.
+
+.PARAMETER ProjectDir
+Project root used to resolve src, artifacts, logs, reports, and default package paths.
+
+.PARAMETER ReportPath
+Optional path for the short user-facing report.
+
+.PARAMETER LogPath
+Optional path for detailed progress logs.
+
+.PARAMETER NoPrompt
+Requires all necessary values through parameters and fails instead of prompting.
+
+.EXAMPLE
+.\Run-DataFabricMigration.ps1
+
+Runs interactively and prompts for missing export/import values.
+
+.EXAMPLE
+.\Run-DataFabricMigration.ps1 -NoPrompt -Mode Export -Tenant SourceTenant -EntityNames "Demo,DemoMain" -PackagePath .\artifacts\packages\migration-package.zip -IncludeFiles
+
+Exports selected entities and file attachments without prompts.
+
+.EXAMPLE
+.\Run-DataFabricMigration.ps1 -NoPrompt -Mode Import -Tenant DestinationTenant -PackagePath .\artifacts\packages\migration-package.zip -IncludeFiles
+
+Imports the package, skips unsupported relationship fields/values, and uploads attachments.
+
+.NOTES
+The tool migrates native user-created Data Fabric entities only. It does not delete destination
+entities, remove fields, or change existing field data types because those operations are unsafe or
+unsupported through the Data Fabric CLI.
+#>
 [CmdletBinding()]
 param(
     [ValidateSet('Export', 'Import')]
@@ -14,8 +101,6 @@ param(
     [string]$EntityNames = '',
 
     [switch]$IncludeFiles = $false,
-
-    [switch]$ImportRelationships = $false,
 
     [int]$PageSize = 100,
 
@@ -483,10 +568,6 @@ function Resolve-MigrationInput {
 
         [bool]$IncludeFilesSpecified = $false,
 
-        [bool]$ImportRelationships = $false,
-
-        [bool]$ImportRelationshipsSpecified = $false,
-
         [int]$PageSize = 100,
 
         [int]$BatchSize = 50,
@@ -524,7 +605,6 @@ function Resolve-MigrationInput {
 
     $resolvedEntityNames = $EntityNames
     $resolvedIncludeFiles = $IncludeFiles
-    $resolvedImportRelationships = $ImportRelationships
     $resolvedPageSize = if ($PageSize -gt 0) { $PageSize } else { 100 }
     $resolvedBatchSize = if ($BatchSize -gt 0) { $BatchSize } else { 50 }
 
@@ -535,7 +615,6 @@ function Resolve-MigrationInput {
     }
     elseif ($resolvedMode -eq 'Import') {
         $resolvedIncludeFiles = Resolve-SwitchValue -Value $IncludeFiles -WasProvided $IncludeFilesSpecified -Prompt 'Upload exported file field attachments?' -ReadText $ReadText -NoPrompt:$NoPrompt
-        $resolvedImportRelationships = Resolve-SwitchValue -Value $ImportRelationships -WasProvided $ImportRelationshipsSpecified -Prompt 'Update relationship fields after import?' -ReadText $ReadText -NoPrompt:$NoPrompt
         $resolvedBatchSize = Resolve-IntegerValue -Value $BatchSize -DefaultValue 50 -Prompt 'Import batch size' -Name 'Batch size' -ReadText $ReadText -NoPrompt:$NoPrompt
     }
 
@@ -547,7 +626,6 @@ function Resolve-MigrationInput {
         PackagePath = $resolvedPackagePath
         EntityNames = $resolvedEntityNames
         IncludeFiles = [bool]$resolvedIncludeFiles
-        ImportRelationships = [bool]$resolvedImportRelationships
         PageSize = $resolvedPageSize
         BatchSize = $resolvedBatchSize
     }
@@ -574,8 +652,6 @@ function Invoke-DataFabricMigrationRunner {
         [string]$EntityNames = '',
 
         [switch]$IncludeFiles = $false,
-
-        [switch]$ImportRelationships = $false,
 
         [int]$PageSize = 100,
 
@@ -617,8 +693,6 @@ function Invoke-DataFabricMigrationRunner {
             -EntityNames $EntityNames `
             -IncludeFiles:$IncludeFiles `
             -IncludeFilesSpecified:$PSBoundParameters.ContainsKey('IncludeFiles') `
-            -ImportRelationships:$ImportRelationships `
-            -ImportRelationshipsSpecified:$PSBoundParameters.ContainsKey('ImportRelationships') `
             -PageSize $PageSize `
             -BatchSize $BatchSize `
             -ProjectDir $projectRoot `
@@ -693,9 +767,6 @@ function Invoke-DataFabricMigrationRunner {
         }
         if ($migrationInput.IncludeFiles) {
             $arguments.IncludeFiles = $true
-        }
-        if ($migrationInput.ImportRelationships) {
-            $arguments.ImportRelationships = $true
         }
 
         $result = Import-DataFabricPackage @arguments

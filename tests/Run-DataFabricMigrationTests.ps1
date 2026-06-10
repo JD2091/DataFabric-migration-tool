@@ -79,7 +79,7 @@ $schema = [pscustomobject]@{
         [pscustomobject]@{ Name = 'Amount'; DisplayName = 'Amount'; Type = 'DECIMAL'; Required = $false; System = $false },
         [pscustomobject]@{ Name = 'Standard'; DisplayName = 'Standard'; Type = 'CHOICE_SET_SINGLE'; Required = $false; System = $false },
         [pscustomobject]@{ Name = 'Attachment'; DisplayName = 'Attachment'; Type = 'FILE'; Required = $false; System = $false },
-        [pscustomobject]@{ Name = 'Parent'; DisplayName = 'Parent'; Type = 'RELATIONSHIP'; Required = $false; System = $false; ReferenceEntityName = 'ParentEntity'; ReferenceFieldName = 'Id' }
+        [pscustomobject]@{ Name = 'Parent'; DisplayName = 'Parent'; Type = 'RELATIONSHIP'; Required = $false; System = $false; ReferenceEntityName = 'ParentEntity' }
     )
 }
 
@@ -135,7 +135,7 @@ Run-Test 'Run script exposes PowerShell-native parameter contract' {
     $runScript = Get-Content -LiteralPath (Join-Path $projectRoot 'Run-DataFabricMigration.ps1') -Raw
     Assert-True ($runScript -match '\[ValidateSet\(''Export'',\s*''Import''\)\]\s*\[string\]\$Mode') 'Runner should expose a typed Export/Import mode parameter.'
     Assert-True ($runScript -match '\[switch\]\$IncludeFiles') 'Runner should use a native switch for IncludeFiles.'
-    Assert-True ($runScript -match '\[switch\]\$ImportRelationships') 'Runner should use a native switch for ImportRelationships.'
+    Assert-True (-not ($runScript -match '\[switch\]\$ImportRelationships')) 'Runner should not expose unsupported ImportRelationships.'
     Assert-True ($runScript -match '\[int\]\$PageSize') 'Runner should use a native integer PageSize.'
     Assert-True ($runScript -match '\[int\]\$BatchSize') 'Runner should use a native integer BatchSize.'
     Assert-True ($runScript -match '\[switch\]\$NoPrompt') 'Runner should support non-interactive NoPrompt mode.'
@@ -155,9 +155,11 @@ Run-Test 'Run script assigns explicit defaults to public parameters' {
     Assert-True ($runScript -match '\[int\]\$PageSize\s*=\s*100') 'PageSize should default to 100.'
     Assert-True ($runScript -match '\[int\]\$BatchSize\s*=\s*50') 'BatchSize should default to 50.'
     Assert-True ($runScript -match '\[string\]\$ProjectDir\s*=\s*\$PSScriptRoot') 'ProjectDir should default to the script root.'
-    foreach ($name in @('IncludeFiles', 'ImportRelationships', 'NoPrompt')) {
+    foreach ($name in @('IncludeFiles', 'NoPrompt')) {
         Assert-True ($runScript -match "\[switch\]\`$$name\s*=\s*\`$false") "$name should default to false."
     }
+    Assert-True (-not ($runScript -match "\[switch\]\`$ImportRelationships")) 'ImportRelationships should not remain as a runner default.'
+    Assert-True (-not ($runScript -match 'Update relationship fields after import')) 'Runner should not prompt for unsupported relationship import.'
 }
 
 Run-Test 'Advanced wrappers assign explicit defaults to public parameters' {
@@ -178,9 +180,10 @@ Run-Test 'Advanced wrappers assign explicit defaults to public parameters' {
     Assert-True (-not ($importScript -match '\[string\]\$ClientId')) 'Import wrapper should not expose ClientId.'
     Assert-True (-not ($importScript -match '\[string\]\$ClientSecret')) 'Import wrapper should not expose ClientSecret.'
     Assert-True ($importScript -match '\[int\]\$BatchSize\s*=\s*50') 'Import wrapper BatchSize should default to 50.'
-    foreach ($name in @('IncludeFiles', 'ImportRelationships')) {
+    foreach ($name in @('IncludeFiles')) {
         Assert-True ($importScript -match "\[switch\]\`$$name\s*=\s*\`$false") "Import wrapper $name should default to false."
     }
+    Assert-True (-not ($importScript -match "\[switch\]\`$ImportRelationships")) 'Import wrapper should not expose unsupported ImportRelationships.'
 }
 
 Run-Test 'Run script exposes testable prompt resolution hooks' {
@@ -549,59 +552,6 @@ Run-Test 'Get-DataFabricInsertedRecordIds handles batch string ID response' {
     Assert-Equal $ids[2] 'dest-3' 'String IDs should be retained in source order.'
 }
 
-Run-Test 'ConvertTo-DataFabricMappedRelationshipValue maps string IDs' {
-    $map = @{ 'source-parent' = 'dest-parent' }
-    $result = ConvertTo-DataFabricMappedRelationshipValue -Value 'source-parent' -RecordIdMap $map
-    Assert-True $result.Mapped 'Relationship should be mapped.'
-    Assert-Equal $result.Value.Id 'dest-parent' 'Destination ID should be returned as a relationship object.'
-}
-
-Run-Test 'ConvertTo-DataFabricMappedRelationshipValue maps relationship collections to object IDs' {
-    $map = @{ 'source-parent-1' = 'dest-parent-1'; 'source-parent-2' = 'dest-parent-2' }
-    $result = ConvertTo-DataFabricMappedRelationshipValue -Value @('source-parent-1', 'source-parent-2') -RecordIdMap $map
-    Assert-True $result.Mapped 'Relationship collection should be mapped.'
-    Assert-Equal @($result.Value).Count 2 'Relationship collection should preserve item count.'
-    Assert-Equal $result.Value[0].Id 'dest-parent-1' 'First relationship item should be an object ID.'
-    Assert-Equal $result.Value[1].Id 'dest-parent-2' 'Second relationship item should be an object ID.'
-}
-
-Run-Test 'Get-DataFabricRelationshipDependencyOrderedManifests orders parents before dependents' {
-    $ordered = @(Get-DataFabricRelationshipDependencyOrderedManifests -EntityManifests @(
-            [pscustomobject]@{ name = 'DemoMain'; relationshipFields = @('NameMain'); relationshipDefinitions = @([pscustomobject]@{ fieldName = 'NameMain'; referenceEntityName = 'Demo'; referenceFieldName = 'Id' }) },
-            [pscustomobject]@{ name = 'Demo'; relationshipFields = @(); relationshipDefinitions = @() }
-        ))
-
-    Assert-Equal $ordered[0].name 'Demo' 'Parent entity should be ordered before dependent entity.'
-    Assert-Equal $ordered[1].name 'DemoMain' 'Dependent entity should follow its parent.'
-}
-
-Run-Test 'Get-DataFabricRelationshipDependencyOrderedManifests preserves circular relationship package order' {
-    $ordered = @(Get-DataFabricRelationshipDependencyOrderedManifests -EntityManifests @(
-            [pscustomobject]@{ name = 'EntityA'; relationshipFields = @('ToB'); relationshipDefinitions = @([pscustomobject]@{ fieldName = 'ToB'; referenceEntityName = 'EntityB'; referenceFieldName = 'Id' }) },
-            [pscustomobject]@{ name = 'EntityB'; relationshipFields = @('ToA'); relationshipDefinitions = @([pscustomobject]@{ fieldName = 'ToA'; referenceEntityName = 'EntityA'; referenceFieldName = 'Id' }) }
-        ))
-
-    Assert-Equal $ordered[0].name 'EntityA' 'Circular relationships should keep package order for cycle members.'
-    Assert-Equal $ordered[1].name 'EntityB' 'Circular relationships should keep package order for cycle members.'
-}
-
-Run-Test 'Get-DataFabricRelationshipDependencyOrderedManifests ignores self relationships' {
-    $ordered = @(Get-DataFabricRelationshipDependencyOrderedManifests -EntityManifests @(
-            [pscustomobject]@{ name = 'Employee'; relationshipFields = @('Manager'); relationshipDefinitions = @([pscustomobject]@{ fieldName = 'Manager'; referenceEntityName = 'Employee'; referenceFieldName = 'Id' }) },
-            [pscustomobject]@{ name = 'Department'; relationshipFields = @(); relationshipDefinitions = @() }
-        ))
-
-    Assert-Equal $ordered[0].name 'Employee' 'Self relationships should not block entity ordering.'
-    Assert-Equal $ordered[1].name 'Department' 'Self relationships should not reorder unrelated entities.'
-}
-
-Run-Test 'ConvertTo-DataFabricMappedRelationshipValue reports unresolved IDs' {
-    $map = @{ 'source-parent' = 'dest-parent' }
-    $result = ConvertTo-DataFabricMappedRelationshipValue -Value 'missing-parent' -RecordIdMap $map
-    Assert-True (-not $result.Mapped) 'Relationship should not map when source ID is missing.'
-    Assert-Equal $result.MissingSourceIds[0] 'missing-parent' 'Missing source ID should be reported.'
-}
-
 # Package integrity tests ensure import catches missing or tampered files before writing to the destination.
 Run-Test 'Package checksum validation detects tampering' {
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-test-' + [guid]::NewGuid().ToString('N'))
@@ -701,7 +651,7 @@ Run-Test 'Export-DataFabricPackage creates package manifest with fake CLI respon
         $relationshipDefinition = @($manifest.entities[0].relationshipDefinitions)[0]
         Assert-Equal $relationshipDefinition.fieldName 'Parent' 'Relationship field definition should include the field name.'
         Assert-Equal $relationshipDefinition.referenceEntityName 'ParentEntity' 'Relationship field definition should include the target entity name.'
-        Assert-Equal $relationshipDefinition.referenceFieldName 'Id' 'Relationship field definition should include the target reference field.'
+        Assert-Equal $relationshipDefinition.referenceFieldName $null 'Relationship field definition should not invent a target reference field.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -1038,314 +988,8 @@ Run-Test 'Import-DataFabricPackage skips choice-set fields from legacy package s
     }
 }
 
-Run-Test 'Import-DataFabricPackage adds relationship fields and updates mapped records' {
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-relationship-test-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-    try {
-        $packagePath = Join-Path $tempRoot 'migration-package.zip'
-        $exportDirectory = Join-Path $tempRoot 'package'
-        $importDirectory = Join-Path $tempRoot 'import'
-        $studentSchema = [pscustomobject]@{
-            Name = 'schoolStudent'
-            DisplayName = 'School Student'
-            Fields = @(
-                [pscustomobject]@{ Name = 'Id'; DisplayName = 'Id'; Type = 'UUID'; Required = $true; System = $true },
-                [pscustomobject]@{ Name = 'Name'; DisplayName = 'Name'; Type = 'STRING'; Required = $true; System = $false }
-            )
-        }
-        $courseSchema = [pscustomobject]@{
-            Name = 'schoolCourse'
-            DisplayName = 'School Course'
-            Fields = @(
-                [pscustomobject]@{ Name = 'Id'; DisplayName = 'Id'; Type = 'UUID'; Required = $true; System = $true },
-                [pscustomobject]@{ Name = 'Title'; DisplayName = 'Title'; Type = 'STRING'; Required = $true; System = $false }
-            )
-        }
-        $marksheetSchema = [pscustomobject]@{
-            Name = 'schoolmarksheet'
-            DisplayName = 'School Marksheet'
-            Fields = @(
-                [pscustomobject]@{ Name = 'Id'; DisplayName = 'Id'; Type = 'UUID'; Required = $true; System = $true },
-                [pscustomobject]@{ Name = 'Score'; DisplayName = 'Score'; Type = 'INTEGER'; Required = $false; System = $false },
-                [pscustomobject]@{ Name = 'Student'; DisplayName = 'Student'; Type = 'RELATIONSHIP'; Required = $true; System = $false; ReferenceFieldName = 'Id' }
-            )
-        }
-
-        $exportInvoker = {
-            param([string[]]$Arguments)
-
-            $command = $Arguments -join ' '
-            if ($command -eq 'login --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
-            }
-            if ($command -eq 'df entities list --native-only --output json') {
-                return [pscustomobject]@{
-                    Result = 'Success'
-                    Data = @(
-                        [pscustomobject]@{ Name = 'schoolStudent'; DisplayName = 'School Student'; ID = 'source-student-entity'; Type = 'Entity'; Source = 'Native' },
-                        [pscustomobject]@{ Name = 'schoolmarksheet'; DisplayName = 'School Marksheet'; ID = 'source-marksheet-entity'; Type = 'Entity'; Source = 'Native' },
-                        [pscustomobject]@{ Name = 'schoolCourse'; DisplayName = 'School Course'; ID = 'source-course-entity'; Type = 'Entity'; Source = 'Native' }
-                    )
-                }
-            }
-            if ($command -eq 'df entities get source-student-entity --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = $studentSchema }
-            }
-            if ($command -eq 'df entities get source-marksheet-entity --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = $marksheetSchema }
-            }
-            if ($command -eq 'df entities get source-course-entity --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = $courseSchema }
-            }
-            if ($command -eq 'df records list source-student-entity --limit 100 --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Records = @([pscustomobject]@{ Id = 'source-student-1'; Name = 'Asha' }); HasNextPage = $false } }
-            }
-            if ($command -eq 'df records list source-marksheet-entity --limit 100 --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Records = @([pscustomobject]@{ Id = 'source-marksheet-1'; Score = 95; Student = 'source-student-1' }); HasNextPage = $false } }
-            }
-            if ($command -eq 'df records list source-course-entity --limit 100 --output json') {
-                return [pscustomobject]@{
-                    Result = 'Success'
-                    Data = [pscustomobject]@{
-                        Records = @(
-                            [pscustomobject]@{ Id = 'source-course-1'; Title = 'Math' },
-                            [pscustomobject]@{ Id = 'source-course-2'; Title = 'Science' }
-                        )
-                        HasNextPage = $false
-                    }
-                }
-            }
-            throw "Unexpected relationship export fake CLI command: $command"
-        }
-
-        [void](Export-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $exportDirectory -Invoker $exportInvoker)
-        $exportManifest = Get-Content -LiteralPath (Join-Path $exportDirectory 'manifest.json') -Raw | ConvertFrom-Json
-        $marksheetManifest = @($exportManifest.entities | Where-Object { $_.name -eq 'schoolmarksheet' })[0]
-        $inferredDefinition = @($marksheetManifest.relationshipDefinitions)[0]
-        Assert-Equal $inferredDefinition.referenceEntityName 'schoolStudent' 'Export should infer missing relationship target entity name from relationship record values.'
-        $inferredDefinition.referenceEntityName = $null
-        $exportManifest.entities = @(
-            (@($exportManifest.entities | Where-Object { $_.name -eq 'schoolmarksheet' })[0]),
-            (@($exportManifest.entities | Where-Object { $_.name -eq 'schoolStudent' })[0]),
-            (@($exportManifest.entities | Where-Object { $_.name -eq 'schoolCourse' })[0])
-        )
-        $exportManifest | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $exportDirectory 'manifest.json') -Encoding UTF8
-        [void](New-DataFabricPackageChecksums -PackageDirectory $exportDirectory)
-        Compress-Archive -Path (Join-Path $exportDirectory '*') -DestinationPath $packagePath -Force
-
-        $calls = [System.Collections.Generic.List[string]]::new()
-        $script:relationshipFieldAdded = $false
-        $importInvoker = {
-            param([string[]]$Arguments)
-
-            $command = $Arguments -join ' '
-            $calls.Add($command)
-            if ($command -eq 'login --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
-            }
-            if ($command -eq 'df entities list --native-only --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = @() }
-            }
-            if ($command -like 'df entities create schoolStudent --file * --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolStudent'; ID = 'dest-student-entity' } }
-            }
-            if ($command -like 'df entities create schoolmarksheet --file * --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolmarksheet'; ID = 'dest-marksheet-entity' } }
-            }
-            if ($command -like 'df entities create schoolCourse --file * --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolCourse'; ID = 'dest-course-entity' } }
-            }
-            if ($command -eq 'df entities get dest-student-entity --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolStudent'; Fields = @([pscustomobject]@{ Name = 'Name'; Type = 'STRING'; Required = $true; System = $false }) } }
-            }
-            if ($command -eq 'df entities get dest-marksheet-entity --output json') {
-                $fields = @([pscustomobject]@{ Name = 'Score'; Type = 'INTEGER'; Required = $false; System = $false })
-                if ($script:relationshipFieldAdded) {
-                    $fields += [pscustomobject]@{ ID = 'relationship-field-student'; Name = 'Student'; Type = 'RELATIONSHIP'; Required = $false; System = $false; ReferenceEntityName = 'schoolStudent'; ReferenceFieldName = 'Id' }
-                }
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolmarksheet'; Fields = $fields } }
-            }
-            if ($command -like 'df entities update dest-marksheet-entity --file * --output json') {
-                $fileIndex = [Array]::IndexOf($Arguments, '--file') + 1
-                $body = Get-Content -LiteralPath $Arguments[$fileIndex] -Raw | ConvertFrom-Json
-                if ($body.PSObject.Properties.Name -contains 'addFields') {
-                    Assert-Equal $body.addFields[0].fieldName 'Student' 'Relationship add field payload should target the Student field.'
-                    Assert-Equal $body.addFields[0].type 'RELATIONSHIP' 'Relationship add field payload should use RELATIONSHIP type.'
-                    Assert-Equal $body.addFields[0].referenceEntityName 'schoolStudent' 'Relationship add field payload should reference the destination target entity name.'
-                    Assert-Equal $body.addFields[0].referenceFieldName 'Id' 'Relationship add field payload should reference the target Id field.'
-                    Assert-True (-not $body.addFields[0].isRequired) 'Relationship add field should be temporarily optional while records are inserted.'
-                    $script:relationshipFieldAdded = $true
-                }
-                elseif ($body.PSObject.Properties.Name -contains 'updateFields') {
-                    Assert-Equal $body.updateFields[0].id 'relationship-field-student' 'Relationship restore payload should use the destination field ID.'
-                    Assert-True $body.updateFields[0].isRequired 'Relationship restore payload should restore the required flag.'
-                }
-                else {
-                    throw 'Relationship schema update payload should add or update fields.'
-                }
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolmarksheet'; ID = 'dest-marksheet-entity' } }
-            }
-            if ($command -like 'df records insert dest-student-entity --file * --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = @('dest-student-1') }
-            }
-            if ($command -like 'df records insert dest-marksheet-entity --file * --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = @('dest-marksheet-1') }
-            }
-            if ($command -like 'df records insert dest-course-entity --file * --output json') {
-                $fileIndex = [Array]::IndexOf($Arguments, '--file') + 1
-                $payload = @(Get-Content -LiteralPath $Arguments[$fileIndex] -Raw | ConvertFrom-Json)
-                Assert-Equal $payload.Count 2 'Unrelated entities should still use batch inserts when -ImportRelationships is enabled.'
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Inserted = $payload.Count } }
-            }
-            if ($command -like 'df records update dest-marksheet-entity --file * --output json') {
-                $fileIndex = [Array]::IndexOf($Arguments, '--file') + 1
-                $body = Get-Content -LiteralPath $Arguments[$fileIndex] -Raw | ConvertFrom-Json
-                Assert-Equal $body.Id 'dest-marksheet-1' 'Relationship update should target the destination marksheet record.'
-                Assert-Equal $body.Student.Id 'dest-student-1' 'Relationship update should map the source student ID to the destination student ID object.'
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Id = 'dest-marksheet-1' } }
-            }
-            throw "Unexpected relationship import fake CLI command: $command"
-        }
-
-        $result = Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory $importDirectory -ImportRelationships -Invoker $importInvoker
-        $relationshipFieldAdds = @($calls | Where-Object { $_ -like '*add-Student.json*' })
-        $relationshipFieldRestores = @($calls | Where-Object { $_ -like '*restore-Student.json*' })
-        $relationshipRecordUpdates = @($calls | Where-Object { $_ -like 'df records update dest-marksheet-entity *' })
-        $courseInserts = @($calls | Where-Object { $_ -like 'df records insert dest-course-entity *' })
-        $studentCreateIndex = $calls.IndexOf((@($calls | Where-Object { $_ -like 'df entities create schoolStudent *' })[0]))
-        $marksheetCreateIndex = $calls.IndexOf((@($calls | Where-Object { $_ -like 'df entities create schoolmarksheet *' })[0]))
-        $studentInsertIndex = $calls.IndexOf((@($calls | Where-Object { $_ -like 'df records insert dest-student-entity *' })[0]))
-        $marksheetInsertIndex = $calls.IndexOf((@($calls | Where-Object { $_ -like 'df records insert dest-marksheet-entity *' })[0]))
-        $report = Get-Content -LiteralPath $result.reportPath -Raw | ConvertFrom-Json
-
-        Assert-True ($studentCreateIndex -ge 0 -and $marksheetCreateIndex -ge 0 -and $studentCreateIndex -lt $marksheetCreateIndex) 'Parent entity should be created before dependent entity even when package order is dependent-first.'
-        Assert-True ($studentInsertIndex -ge 0 -and $marksheetInsertIndex -ge 0 -and $studentInsertIndex -lt $marksheetInsertIndex) 'Parent records should be inserted before dependent records even when package order is dependent-first.'
-        Assert-Equal $relationshipFieldAdds.Count 1 'Import should add the missing relationship field before relationship record updates.'
-        Assert-Equal $relationshipFieldRestores.Count 1 'Import should restore the required relationship flag after relationship record updates.'
-        Assert-Equal $relationshipRecordUpdates.Count 1 'Import should update the relationship value after records are mapped.'
-        Assert-Equal $courseInserts.Count 1 'Unrelated entities should not be forced into single-record inserts by -ImportRelationships.'
-        Assert-Equal @($report.relationshipFieldsAdded).Count 1 'Import report should record added relationship fields.'
-        Assert-Equal @($report.relationshipFieldsRestored).Count 1 'Import report should record restored relationship fields.'
-        Assert-Equal @($report.relationshipUpdates).Count 1 'Import report should record relationship value updates.'
-    }
-    finally {
-        if (Test-Path -LiteralPath $tempRoot) {
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force
-        }
-    }
-}
-
-Run-Test 'Import-DataFabricPackage reports unresolved inferred relationship target' {
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-unresolved-relationship-test-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-    try {
-        $packagePath = Join-Path $tempRoot 'migration-package.zip'
-        $packageDirectory = Join-Path $tempRoot 'package'
-        $entityDirectory = Join-Path $packageDirectory 'entities\schoolmarksheet'
-        New-Item -ItemType Directory -Path $entityDirectory -Force | Out-Null
-
-        $marksheetSchema = [pscustomobject]@{
-            Name = 'schoolmarksheet'
-            DisplayName = 'School Marksheet'
-            Fields = @(
-                [pscustomobject]@{ Name = 'Id'; DisplayName = 'Id'; Type = 'UUID'; Required = $true; System = $true },
-                [pscustomobject]@{ Name = 'Score'; DisplayName = 'Score'; Type = 'INTEGER'; Required = $false; System = $false },
-                [pscustomobject]@{ Name = 'Student'; DisplayName = 'Student'; Type = 'RELATIONSHIP'; Required = $false; System = $false; ReferenceFieldName = 'Id' }
-            )
-        }
-        $createBody = [pscustomobject]@{
-            displayName = 'School Marksheet'
-            fields = @([pscustomobject]@{ fieldName = 'Score'; type = 'INTEGER'; isRequired = $false })
-        }
-        $records = @(
-            [pscustomobject]@{
-                sourceRecordId = 'source-marksheet-1'
-                data = [pscustomobject]@{ Score = 95 }
-                fileFields = [pscustomobject]@{}
-                relationships = [pscustomobject]@{ Student = 'missing-student-1' }
-                removedSystemFields = @('Id')
-            }
-        )
-        $manifest = [pscustomobject]@{
-            formatVersion = '1.0'
-            exportedUtc = '2026-06-07T00:00:00.0000000Z'
-            source = [pscustomobject]@{}
-            tenant = ''
-            entities = @(
-                [pscustomobject]@{
-                    name = 'schoolmarksheet'
-                    displayName = 'School Marksheet'
-                    sourceEntityId = 'source-marksheet-entity'
-                    type = 'Entity'
-                    source = 'Native'
-                    schemaPath = 'entities\schoolmarksheet\schema.json'
-                    createBodyPath = 'entities\schoolmarksheet\create-body.json'
-                    recordsPath = 'entities\schoolmarksheet\records.json'
-                    recordCount = 1
-                    fileFields = @()
-                    relationshipFields = @('Student')
-                    relationshipDefinitions = @([pscustomobject]@{
-                            fieldName = 'Student'
-                            type = 'RELATIONSHIP'
-                            referenceEntityName = $null
-                            referenceFieldName = 'Id'
-                            displayName = 'Student'
-                            isRequired = $false
-                        })
-                    skippedFields = @()
-                }
-            )
-            skippedEntities = @()
-            attachments = @()
-            errors = @()
-        }
-
-        $marksheetSchema | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $entityDirectory 'schema.json') -Encoding UTF8
-        $createBody | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $entityDirectory 'create-body.json') -Encoding UTF8
-        $records | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $entityDirectory 'records.json') -Encoding UTF8
-        $manifest | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $packageDirectory 'manifest.json') -Encoding UTF8
-        [void](New-DataFabricPackageChecksums -PackageDirectory $packageDirectory)
-        Compress-Archive -Path (Join-Path $packageDirectory '*') -DestinationPath $packagePath -Force
-
-        $importInvoker = {
-            param([string[]]$Arguments)
-
-            $command = $Arguments -join ' '
-            if ($command -eq 'login --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } }
-            }
-            if ($command -eq 'df entities list --native-only --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = @() }
-            }
-            if ($command -like 'df entities create schoolmarksheet --file * --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolmarksheet'; ID = 'dest-marksheet-entity' } }
-            }
-            if ($command -eq 'df entities get dest-marksheet-entity --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'schoolmarksheet'; Fields = @([pscustomobject]@{ Name = 'Score'; Type = 'INTEGER'; Required = $false; System = $false }) } }
-            }
-            if ($command -like 'df entities update dest-marksheet-entity --file * --output json') {
-                throw 'Relationship field should not be added when target inference fails.'
-            }
-            if ($command -like 'df records insert dest-marksheet-entity --file * --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = @('dest-marksheet-1') }
-            }
-            throw "Unexpected unresolved relationship import fake CLI command: $command"
-        }
-
-        $result = Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory (Join-Path $tempRoot 'import') -ImportRelationships -Invoker $importInvoker
-        $report = Get-Content -LiteralPath $result.reportPath -Raw | ConvertFrom-Json
-
-        Assert-True (@($report.skippedItems | Where-Object { $_.entity -eq 'schoolmarksheet' -and $_.field -eq 'Student' -and $_.reason -eq 'relationship field skipped because target entity could not be inferred' }).Count -eq 1) 'Unresolved relationship target inference should be reported clearly.'
-    }
-    finally {
-        if (Test-Path -LiteralPath $tempRoot) {
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force
-        }
-    }
-}
-
-Run-Test 'Import-DataFabricPackage blocks dependent records when existing relationship field has wrong type' {
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-wrong-relationship-type-test-' + [guid]::NewGuid().ToString('N'))
+Run-Test 'Import-DataFabricPackage skips relationship fields and values' {
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('df-migration-import-skip-relationship-test-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     try {
         $packagePath = Join-Path $tempRoot 'migration-package.zip'
@@ -1355,19 +999,25 @@ Run-Test 'Import-DataFabricPackage blocks dependent records when existing relati
         New-Item -ItemType Directory -Path $mainDirectory -Force | Out-Null
         New-Item -ItemType Directory -Path $demoDirectory -Force | Out-Null
 
-        ([pscustomobject]@{ Name = 'DemoMain'; Fields = @([pscustomobject]@{ Name = 'NameMain'; Type = 'RELATIONSHIP'; System = $false; ReferenceEntityName = 'Demo'; ReferenceFieldName = 'Id' }, [pscustomobject]@{ Name = 'Surname'; Type = 'STRING'; System = $false }) }) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $mainDirectory 'schema.json') -Encoding UTF8
+        ([pscustomobject]@{ Name = 'DemoMain'; Fields = @([pscustomobject]@{ Name = 'NameMain'; Type = 'RELATIONSHIP'; System = $false }, [pscustomobject]@{ Name = 'Surname'; Type = 'STRING'; System = $false }) }) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $mainDirectory 'schema.json') -Encoding UTF8
         ([pscustomobject]@{ Name = 'Demo'; Fields = @([pscustomobject]@{ Name = 'Name'; Type = 'STRING'; System = $false }) }) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $demoDirectory 'schema.json') -Encoding UTF8
         ([pscustomobject]@{ displayName = 'DemoMain'; fields = @([pscustomobject]@{ fieldName = 'Surname'; type = 'STRING' }) }) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $mainDirectory 'create-body.json') -Encoding UTF8
         ([pscustomobject]@{ displayName = 'Demo'; fields = @([pscustomobject]@{ fieldName = 'Name'; type = 'STRING' }) }) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $demoDirectory 'create-body.json') -Encoding UTF8
-        @([pscustomobject]@{ sourceRecordId = 'source-main-1'; data = [pscustomobject]@{ Surname = 'rty' }; fileFields = [pscustomobject]@{}; relationships = [pscustomobject]@{ NameMain = 'source-demo-1' }; removedSystemFields = @('Id') }) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $mainDirectory 'records.json') -Encoding UTF8
-        @([pscustomobject]@{ sourceRecordId = 'source-demo-1'; data = [pscustomobject]@{ Name = 'xyz' }; fileFields = [pscustomobject]@{}; relationships = [pscustomobject]@{}; removedSystemFields = @('Id') }) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $demoDirectory 'records.json') -Encoding UTF8
+        @(
+            [pscustomobject]@{ sourceRecordId = 'source-main-1'; data = [pscustomobject]@{ Surname = 'rty' }; fileFields = [pscustomobject]@{}; relationships = [pscustomobject]@{ NameMain = 'source-demo-1' }; removedSystemFields = @('Id') },
+            [pscustomobject]@{ sourceRecordId = 'source-main-2'; data = [pscustomobject]@{ Surname = 'dfg' }; fileFields = [pscustomobject]@{}; relationships = [pscustomobject]@{ NameMain = 'source-demo-2' }; removedSystemFields = @('Id') }
+        ) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $mainDirectory 'records.json') -Encoding UTF8
+        @(
+            [pscustomobject]@{ sourceRecordId = 'source-demo-1'; data = [pscustomobject]@{ Name = 'xyz' }; fileFields = [pscustomobject]@{}; relationships = [pscustomobject]@{}; removedSystemFields = @('Id') },
+            [pscustomobject]@{ sourceRecordId = 'source-demo-2'; data = [pscustomobject]@{ Name = 'abc' }; fileFields = [pscustomobject]@{}; relationships = [pscustomobject]@{}; removedSystemFields = @('Id') }
+        ) | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $demoDirectory 'records.json') -Encoding UTF8
         ([pscustomobject]@{
                 formatVersion = '1.0'
                 exportedUtc = '2026-06-07T00:00:00.0000000Z'
                 source = [pscustomobject]@{}
                 tenant = ''
                 entities = @(
-                    [pscustomobject]@{ name = 'DemoMain'; sourceEntityId = 'source-main-entity'; schemaPath = 'entities\DemoMain\schema.json'; createBodyPath = 'entities\DemoMain\create-body.json'; recordsPath = 'entities\DemoMain\records.json'; relationshipFields = @('NameMain'); relationshipDefinitions = @([pscustomobject]@{ fieldName = 'NameMain'; type = 'RELATIONSHIP'; referenceEntityName = 'Demo'; referenceFieldName = 'Id'; isRequired = $false }); fileFields = @() },
+                    [pscustomobject]@{ name = 'DemoMain'; sourceEntityId = 'source-main-entity'; schemaPath = 'entities\DemoMain\schema.json'; createBodyPath = 'entities\DemoMain\create-body.json'; recordsPath = 'entities\DemoMain\records.json'; relationshipFields = @('NameMain'); relationshipDefinitions = @([pscustomobject]@{ fieldName = 'NameMain'; type = 'RELATIONSHIP'; referenceEntityName = $null; referenceFieldName = $null; isRequired = $false }); fileFields = @() },
                     [pscustomobject]@{ name = 'Demo'; sourceEntityId = 'source-demo-entity'; schemaPath = 'entities\Demo\schema.json'; createBodyPath = 'entities\Demo\create-body.json'; recordsPath = 'entities\Demo\records.json'; relationshipFields = @(); relationshipDefinitions = @(); fileFields = @() }
                 )
                 skippedEntities = @()
@@ -1378,6 +1028,7 @@ Run-Test 'Import-DataFabricPackage blocks dependent records when existing relati
         Compress-Archive -Path (Join-Path $packageDirectory '*') -DestinationPath $packagePath -Force
 
         $calls = [System.Collections.Generic.List[string]]::new()
+        $script:mainInsertBodyPath = $null
         $importInvoker = {
             param([string[]]$Arguments)
 
@@ -1385,32 +1036,42 @@ Run-Test 'Import-DataFabricPackage blocks dependent records when existing relati
             $calls.Add($command)
             if ($command -eq 'login --output json') { return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Status = 'Logged in' } } }
             if ($command -eq 'df entities list --native-only --output json') {
-                return [pscustomobject]@{
-                    Result = 'Success'
-                    Data = @(
-                        [pscustomobject]@{ Name = 'DemoMain'; ID = 'dest-main-entity'; Type = 'Entity'; Source = 'Native' },
-                        [pscustomobject]@{ Name = 'Demo'; ID = 'dest-demo-entity'; Type = 'Entity'; Source = 'Native' }
-                    )
-                }
+                return [pscustomobject]@{ Result = 'Success'; Data = @() }
             }
-            if ($command -eq 'df entities get dest-demo-entity --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'Demo'; Fields = @([pscustomobject]@{ Name = 'Name'; Type = 'STRING'; Required = $false; System = $false }) } }
+            if ($command -like 'df entities create DemoMain --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'DemoMain'; ID = 'dest-main-entity' } }
             }
-            if ($command -eq 'df entities get dest-main-entity --output json') {
-                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'DemoMain'; Fields = @([pscustomobject]@{ Name = 'Surname'; Type = 'STRING'; Required = $false; System = $false }, [pscustomobject]@{ Name = 'NameMain'; Type = 'UUID'; Required = $false; System = $false }) } }
+            if ($command -like 'df entities create Demo --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Name = 'Demo'; ID = 'dest-demo-entity' } }
             }
-            if ($command -like 'df records insert dest-demo-entity --file * --output json') { return [pscustomobject]@{ Result = 'Success'; Data = @('dest-demo-1') } }
-            if ($command -like 'df records insert dest-main-entity --file * --output json') { throw 'Dependent records should not be inserted when NameMain has the wrong destination type.' }
-            throw "Unexpected incompatible relationship fake CLI command: $command"
+            if ($command -like 'df entities update *') {
+                throw 'Relationship schema should not be updated during import.'
+            }
+            if ($command -like 'df records update *') {
+                throw 'Relationship values should not be updated during import.'
+            }
+            if ($command -like 'df records insert dest-main-entity --file * --output json') {
+                $fileIndex = [Array]::IndexOf($Arguments, '--file') + 1
+                $script:mainInsertBodyPath = $Arguments[$fileIndex]
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Inserted = 2 } }
+            }
+            if ($command -like 'df records insert dest-demo-entity --file * --output json') {
+                return [pscustomobject]@{ Result = 'Success'; Data = [pscustomobject]@{ Inserted = 2 } }
+            }
+            throw "Unexpected skipped relationship fake CLI command: $command"
         }
 
-        $result = Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory (Join-Path $tempRoot 'import') -ImportRelationships -Invoker $importInvoker
+        $result = Import-DataFabricPackage -PackagePath $packagePath -WorkingDirectory (Join-Path $tempRoot 'import') -Invoker $importInvoker
         $report = Get-Content -LiteralPath $result.reportPath -Raw | ConvertFrom-Json
-        $relationshipFailure = @($report.failures | Where-Object { $_.entity -eq 'DemoMain' -and $_.PSObject.Properties['field'] -and $_.field -eq 'NameMain' })[0]
+        $mainPayload = @(Get-Content -LiteralPath $script:mainInsertBodyPath -Raw | ConvertFrom-Json)
 
-        Assert-True ($result.failureCount -gt 0) 'Incompatible destination relationship field should be reported as a failure.'
-        Assert-True ($relationshipFailure.message -match 'cannot be changed' -and $relationshipFailure.actualType -eq 'UUID' -and $relationshipFailure.expectedType -eq 'RELATIONSHIP') 'Failure should explain the immutable wrong field type.'
-        Assert-Equal (@($calls | Where-Object { $_ -like 'df records insert dest-main-entity *' }).Count) 0 'Dependent DemoMain records should not be inserted after relationship compatibility failure.'
+        Assert-Equal (@($calls | Where-Object { $_ -like 'df entities update *' }).Count) 0 'Import should not attempt relationship schema updates.'
+        Assert-Equal (@($calls | Where-Object { $_ -like 'df records update *' }).Count) 0 'Import should not attempt relationship value updates.'
+        Assert-Equal $mainPayload.Count 2 'Relationship-bearing records without files should remain batch inserted.'
+        Assert-True (-not ($mainPayload[0].PSObject.Properties.Name -contains 'NameMain')) 'Relationship values should be removed from insert payloads.'
+        Assert-Equal (@($report.relationshipFieldsAdded).Count) 0 'No relationship fields should be added.'
+        Assert-Equal (@($report.relationshipUpdates).Count) 0 'No relationship values should be updated.'
+        Assert-True (@($report.skippedItems | Where-Object { $_.entity -eq 'DemoMain' -and $_.field -eq 'NameMain' -and $_.reason -match 'Relationship fields are not supported for import' }).Count -eq 1) 'Unsupported relationship import should be reported.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {

@@ -2,7 +2,7 @@
 
 Standalone PowerShell utility for exporting and importing UiPath Data Fabric entities, records, and optional file-field attachments.
 
-The primary entrypoint is `Run-DataFabricMigration.ps1`. It prompts for missing values in the console, or runs fully non-interactively when all required parameters are supplied with `-NoPrompt`. The migration engine still uses the installed `uip df` CLI and creates a portable ZIP package. It migrates native user-created entities only. System/federated entities, system fields, unsupported choice-set fields, and unresolved relationships are skipped and reported.
+The primary entrypoint is `Run-DataFabricMigration.ps1`. It prompts for missing values in the console, or runs fully non-interactively when all required parameters are supplied with `-NoPrompt`. The migration engine still uses the installed `uip df` CLI and creates a portable ZIP package. It migrates native user-created entities only. System/federated entities, system fields, unsupported choice-set fields, and relationship fields are skipped and reported.
 
 ## Files
 
@@ -65,7 +65,6 @@ Import into a destination organization without prompts:
   -Tenant "DestinationTenant" `
   -PackagePath .\artifacts\packages\migration-package.zip `
   -IncludeFiles `
-  -ImportRelationships `
   -BatchSize 50
 ```
 
@@ -93,14 +92,14 @@ Write detailed progress logs to a specific file:
 - `-LogPath` writes detailed timestamped progress logs. If omitted, logs are created under `.\artifacts\logs\DataFabricMigration-<timestamp>.log`.
 - If `-ReportPath` is omitted, reports are created under `.\artifacts\reports\`.
 - Export supports `-EntityNames`, `-IncludeFiles`, `-PageSize`, and `-PackagePath`.
-- Import supports `-IncludeFiles`, `-ImportRelationships`, `-BatchSize`, and `-PackagePath`.
+- Import supports `-IncludeFiles`, `-BatchSize`, and `-PackagePath`.
 
 ## Progress And Logs
 
 The runner prints concise terminal updates during long runs:
 
 - Export: startup, authentication, entity discovery, skipped entities, each entity being exported, record pages read, file downloads, package creation, and final counts.
-- Import: startup, package validation, destination entity discovery, each entity being imported, entity create/reuse, record batches, relationship updates, file uploads, and final counts.
+- Import: startup, package validation, destination entity discovery, each entity being imported, entity create/reuse, record batches, skipped relationship fields, file uploads, and final counts.
 
 The detailed log file includes the same progress with ISO timestamps, operation/stage names, warning/error levels, and structured event details such as package paths, batch sizes, entity IDs, record counts, batch numbers, and skipped-item reasons. Use this file for troubleshooting if a migration fails or stalls.
 
@@ -109,7 +108,7 @@ The detailed log file includes the same progress with ISO timestamps, operation/
 1. `Run-DataFabricMigration.ps1` collects parameters or prompts for missing input.
 2. The runner resolves runtime paths under `artifacts`, initializes the log/report files, and imports `src/DataFabricMigration.psm1`.
 3. Export mode logs into the source tenant, lists native entities, exports schema and records, optionally downloads file attachments, writes checksums, and creates the package ZIP.
-4. Import mode validates and expands the package, logs into the destination tenant, creates or reuses entities, optionally adds compatible relationship fields, inserts records in batches, optionally updates relationships and uploads files, then writes `import-report.json`.
+4. Import mode validates and expands the package, logs into the destination tenant, creates or reuses entities, inserts scalar records in batches, reports skipped relationship fields/values, optionally uploads files, then writes `import-report.json`.
 5. `scripts/Export-DataFabric.ps1` and `scripts/Import-DataFabric.ps1` bypass prompts for automation but call the same module functions.
 
 ## Advanced Script Entry Points
@@ -166,21 +165,15 @@ Preview import actions without making changes:
 .\scripts\Import-DataFabric.ps1 -PackagePath .\artifacts\packages\migration-package.zip -WhatIf
 ```
 
-Relationship schema and value updates are skipped by default. After confirming the destination can accept relationship fields, opt in:
-
-```powershell
-.\scripts\Import-DataFabric.ps1 -PackagePath .\artifacts\packages\migration-package.zip -ImportRelationships
-```
-
 ## Package Format
 
 The ZIP contains:
 
-- `manifest.json`: source tenant metadata, entity mappings, record counts, relationship field definitions, skipped items, and export errors.
+- `manifest.json`: source tenant metadata, entity mappings, record counts, relationship field names/definitions for audit, skipped items, and export errors.
 - `checksums.json`: SHA-256 checksums for package validation before import.
 - `entities/<EntityName>/schema.json`: exported schema from `uip df entities get`, with unsupported choice-set fields removed.
 - `entities/<EntityName>/create-body.json`: sanitized entity-create body used by import for missing entities.
-- `entities/<EntityName>/records.json`: sanitized export records with first-pass insert data, separated file-field metadata, relationship values, and source record IDs.
+- `entities/<EntityName>/records.json`: sanitized export records with first-pass insert data, separated file-field metadata, relationship values for visibility only, and source record IDs.
 - `files/<EntityName>/<RecordId>/...`: downloaded file attachments when `-IncludeFiles` is used.
 
 ## Migration Behavior
@@ -189,17 +182,16 @@ The ZIP contains:
 - System fields are removed from record insert payloads: `Id`, `CreatedBy`, `CreateTime`, `UpdatedBy`, `UpdateTime`.
 - Choice set fields are not supported. Fields of type `CHOICE_SET_SINGLE` and `CHOICE_SET_MULTIPLE`, including their record values, are skipped during export and import because the current `uip df` CLI does not expose the choice set definitions/options required to recreate them.
 - Destination entities are matched by entity name. Existing entities are reused; missing entities are created.
-- Records are inserted in batches using `-BatchSize` unless that entity needs source-to-destination record ID mapping for file attachments or relationship updates.
+- Records are inserted in batches using `-BatchSize` unless that entity needs source-to-destination record ID mapping for file attachments.
 - File attachments upload after records exist and can be mapped. Only entities with exported attachments fall back to single-record inserts when `-IncludeFiles` is used.
-- Relationship fields and values are preserved only when `-ImportRelationships` is specified. The importer creates missing compatible relationship fields after all destination entities exist, uses single-record inserts only for relationship owner/target entities that need ID mapping, then updates relationship values using destination record IDs.
-- Failures are collected in reports; one failed entity, batch, file, or relationship does not stop the whole import.
+- Relationship fields are not supported for import. `uip df entities get` exposes `Type = RELATIONSHIP`, but it does not reliably expose Orchestrator advanced options such as related entity and related display field. Relationship field names/values are exported for visibility only and skipped during import. Recreate relationship fields manually in the destination when needed.
+- Failures are collected in reports; one failed entity, batch, or file does not stop the whole import.
 
 ## Performance Notes
 
 - Increase `-PageSize` during export to reduce record-list calls.
-- Increase `-BatchSize` during import for entities that do not need file or relationship ID mapping.
+- Increase `-BatchSize` during import for entities that do not need file ID mapping.
 - Avoid `-IncludeFiles` unless file-field attachments are in scope.
-- Avoid `-ImportRelationships` unless relationship fields and values must be preserved.
 - File transfers remain sequential to avoid throttling and retry complexity.
 
 ## Test

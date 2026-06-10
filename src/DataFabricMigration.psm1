@@ -8,6 +8,7 @@ $script:SystemFieldNames = @('Id', 'CreatedBy', 'CreateTime', 'UpdatedBy', 'Upda
 $script:ReservedFieldNames = @('Id', 'CreatedBy', 'CreateTime', 'UpdatedBy', 'UpdateTime')
 $script:ChoiceSetFieldTypes = @('CHOICE_SET_SINGLE', 'CHOICE_SET_MULTIPLE')
 $script:ChoiceSetUnsupportedReason = 'Choice set fields are not supported because uip df does not expose choice set details'
+$script:RelationshipImportUnsupportedReason = 'Relationship fields are not supported for import because current uip df schema output does not expose related entity/display-field metadata.'
 
 # Reads a property from PSCustomObject/hashtable data using the first matching name.
 function Get-PropertyValue {
@@ -742,7 +743,9 @@ function Get-DataFabricFieldByName {
     return $null
 }
 
-# Extracts portable relationship field definitions from source schema metadata.
+# Extracts relationship field definitions for audit metadata only.
+# Current uip df schema output commonly exposes Type=RELATIONSHIP without the Orchestrator advanced
+# options, so import never tries to recreate these fields from partial metadata.
 function Get-DataFabricRelationshipFieldDefinitions {
     param(
         [Parameter(Mandatory)]
@@ -765,9 +768,6 @@ function Get-DataFabricRelationshipFieldDefinitions {
 
         $referenceEntityName = Get-PropertyValue -InputObject $field -Names @('ReferenceEntityName', 'referenceEntityName', 'TargetEntityName', 'targetEntityName')
         $referenceFieldName = Get-PropertyValue -InputObject $field -Names @('ReferenceFieldName', 'referenceFieldName', 'TargetFieldName', 'targetFieldName')
-        if ([string]::IsNullOrWhiteSpace($referenceFieldName)) {
-            $referenceFieldName = 'Id'
-        }
 
         $definition = [ordered]@{
             fieldName = $name
@@ -793,193 +793,6 @@ function Get-DataFabricRelationshipFieldDefinitions {
     }
 
     return $definitions
-}
-
-# Builds the field definition accepted by Data Fabric addFields for a relationship field.
-function New-DataFabricRelationshipAddFieldBody {
-    param(
-        [Parameter(Mandatory)]
-        [object]$Definition,
-
-        [switch]$ForceOptional
-    )
-
-    $fieldName = Get-PropertyValue -InputObject $Definition -Names @('fieldName', 'FieldName', 'Name')
-    $referenceEntityName = Get-PropertyValue -InputObject $Definition -Names @('referenceEntityName', 'ReferenceEntityName', 'targetEntityName', 'TargetEntityName')
-    $referenceFieldName = Get-PropertyValue -InputObject $Definition -Names @('referenceFieldName', 'ReferenceFieldName', 'targetFieldName', 'TargetFieldName')
-    if ([string]::IsNullOrWhiteSpace($referenceFieldName)) {
-        $referenceFieldName = 'Id'
-    }
-
-    $body = [ordered]@{
-        fieldName = $fieldName
-        type = 'RELATIONSHIP'
-        referenceEntityName = $referenceEntityName
-        referenceFieldName = $referenceFieldName
-    }
-
-    foreach ($pair in @(
-        @{ Source = @('displayName', 'DisplayName'); Target = 'displayName' },
-        @{ Source = @('description', 'Description'); Target = 'description' },
-        @{ Source = @('isUnique', 'Unique', 'IsUnique'); Target = 'isUnique' },
-        @{ Source = @('defaultValue', 'DefaultValue'); Target = 'defaultValue' }
-    )) {
-        $value = Get-PropertyValue -InputObject $Definition -Names $pair.Source
-        if ($null -ne $value) {
-            $body[$pair.Target] = ConvertTo-HashtableDeep -InputObject $value
-        }
-    }
-
-    $isRequired = Get-PropertyValue -InputObject $Definition -Names @('isRequired', 'Required', 'IsRequired')
-    if ($ForceOptional) {
-        $body.isRequired = $false
-    }
-    elseif ($null -ne $isRequired) {
-        $body.isRequired = [bool]$isRequired
-    }
-
-    [pscustomobject]$body
-}
-
-# Checks whether an existing destination relationship field points at the same target.
-function Test-DataFabricRelationshipFieldCompatible {
-    param(
-        [AllowNull()]
-        [object]$Field,
-
-        [Parameter(Mandatory)]
-        [object]$Definition
-    )
-
-    if ($null -eq $Field -or -not (Test-DataFabricRelationshipField -Field $Field)) {
-        return $false
-    }
-
-    $expectedEntity = Get-PropertyValue -InputObject $Definition -Names @('referenceEntityName', 'ReferenceEntityName', 'targetEntityName', 'TargetEntityName')
-    $expectedField = Get-PropertyValue -InputObject $Definition -Names @('referenceFieldName', 'ReferenceFieldName', 'targetFieldName', 'TargetFieldName')
-    if ([string]::IsNullOrWhiteSpace($expectedField)) {
-        $expectedField = 'Id'
-    }
-
-    $actualEntity = Get-PropertyValue -InputObject $Field -Names @('ReferenceEntityName', 'referenceEntityName', 'TargetEntityName', 'targetEntityName')
-    $actualField = Get-PropertyValue -InputObject $Field -Names @('ReferenceFieldName', 'referenceFieldName', 'TargetFieldName', 'targetFieldName')
-    if ([string]::IsNullOrWhiteSpace($actualField)) {
-        $actualField = 'Id'
-    }
-
-    if ([string]::IsNullOrWhiteSpace($expectedEntity)) {
-        return $true
-    }
-
-    return ([string]::Equals([string]$actualEntity, [string]$expectedEntity, [System.StringComparison]::OrdinalIgnoreCase) -and [string]::Equals([string]$actualField, [string]$expectedField, [System.StringComparison]::OrdinalIgnoreCase))
-}
-
-function New-DataFabricRelationshipCompatibilityFailure {
-    param(
-        [Parameter(Mandatory)]
-        [string]$EntityName,
-
-        [Parameter(Mandatory)]
-        [string]$FieldName,
-
-        [Parameter(Mandatory)]
-        [object]$Field,
-
-        [Parameter(Mandatory)]
-        [object]$Definition
-    )
-
-    $actualType = Get-DataFabricFieldType -Field $Field
-    $actualEntity = Get-PropertyValue -InputObject $Field -Names @('ReferenceEntityName', 'referenceEntityName', 'TargetEntityName', 'targetEntityName')
-    $actualField = Get-PropertyValue -InputObject $Field -Names @('ReferenceFieldName', 'referenceFieldName', 'TargetFieldName', 'targetFieldName')
-    if ([string]::IsNullOrWhiteSpace($actualField)) {
-        $actualField = 'Id'
-    }
-
-    $expectedEntity = Get-PropertyValue -InputObject $Definition -Names @('referenceEntityName', 'ReferenceEntityName', 'targetEntityName', 'TargetEntityName')
-    $expectedField = Get-PropertyValue -InputObject $Definition -Names @('referenceFieldName', 'ReferenceFieldName', 'targetFieldName', 'TargetFieldName')
-    if ([string]::IsNullOrWhiteSpace($expectedField)) {
-        $expectedField = 'Id'
-    }
-
-    $message = if (Test-DataFabricRelationshipField -Field $Field) {
-        "Destination field '$FieldName' on entity '$EntityName' is an incompatible relationship field and cannot be changed automatically. Expected target '$expectedEntity.$expectedField' but found '$actualEntity.$actualField'. Fix or recreate the destination field/entity manually before importing relationships."
-    }
-    else {
-        "Destination field '$FieldName' on entity '$EntityName' has type '$actualType' and cannot be changed to RELATIONSHIP. Data Fabric does not support changing field data types. Fix or recreate the destination field/entity manually before importing relationships."
-    }
-
-    [pscustomobject]@{
-        entity = $EntityName
-        field = $FieldName
-        operation = 'relationship schema compatibility'
-        message = $message
-        actualType = $actualType
-        expectedType = 'RELATIONSHIP'
-        actualReferenceEntityName = $actualEntity
-        actualReferenceFieldName = $actualField
-        expectedReferenceEntityName = $expectedEntity
-        expectedReferenceFieldName = $expectedField
-    }
-}
-
-# Normalizes relationship definitions from current and legacy package manifests.
-function Get-DataFabricManifestRelationshipDefinitions {
-    param(
-        [Parameter(Mandatory)]
-        [object]$EntityManifest
-    )
-
-    $definitions = @()
-    $rawDefinitions = Get-PropertyValue -InputObject $EntityManifest -Names @('relationshipDefinitions')
-    if ($null -ne $rawDefinitions) {
-        foreach ($definition in @($rawDefinitions)) {
-            $definitions += $definition
-        }
-    }
-
-    if ($definitions.Count -eq 0) {
-        $relationshipFields = Get-PropertyValue -InputObject $EntityManifest -Names @('relationshipFields')
-        foreach ($fieldName in @($relationshipFields)) {
-            if (-not [string]::IsNullOrWhiteSpace($fieldName)) {
-                $definitions += [pscustomobject]@{
-                    fieldName = [string]$fieldName
-                    type = 'RELATIONSHIP'
-                    referenceEntityName = $null
-                    referenceFieldName = 'Id'
-                    isRequired = $false
-                }
-            }
-        }
-    }
-
-    return $definitions
-}
-
-function Set-DataFabricPropertyValue {
-    param(
-        [Parameter(Mandatory)]
-        [object]$InputObject,
-
-        [Parameter(Mandatory)]
-        [string]$Name,
-
-        [AllowNull()]
-        [object]$Value
-    )
-
-    if ($InputObject -is [System.Collections.IDictionary]) {
-        $InputObject[$Name] = $Value
-        return
-    }
-
-    $property = $InputObject.PSObject.Properties[$Name]
-    if ($null -ne $property) {
-        $property.Value = $Value
-        return
-    }
-
-    Add-Member -InputObject $InputObject -NotePropertyName $Name -NotePropertyValue $Value -Force
 }
 
 # Removes readonly system fields from a record before insert payload creation.
@@ -1063,7 +876,7 @@ function New-DataFabricEntityCreateBody {
         if ((Test-DataFabricRelationshipField -Field $field) -and -not $IncludeRelationshipFields) {
             $skippedFields += [pscustomobject]@{
                 name = $name
-                reason = 'relationship field skipped by default'
+                reason = $script:RelationshipImportUnsupportedReason
             }
             continue
         }
@@ -1227,343 +1040,7 @@ function Get-DataFabricInsertedRecordIds {
     return $ids
 }
 
-# Resolves the source record ID represented by a relationship value.
-function Resolve-DataFabricRelationshipSourceId {
-    param(
-        [AllowNull()]
-        [object]$Value
-    )
-
-    if ($null -eq $Value) {
-        return $null
-    }
-
-    if ($Value -is [string]) {
-        return $Value
-    }
-
-    return Get-DataFabricObjectId -InputObject $Value
-}
-
-function Get-DataFabricRelationshipSourceIds {
-    param(
-        [AllowNull()]
-        [object]$Value
-    )
-
-    if ($null -eq $Value) {
-        return @()
-    }
-
-    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string] -and $Value -isnot [pscustomobject] -and $Value -isnot [System.Collections.IDictionary]) {
-        $ids = @()
-        foreach ($item in $Value) {
-            $ids += Get-DataFabricRelationshipSourceIds -Value $item
-        }
-        return $ids
-    }
-
-    $sourceId = Resolve-DataFabricRelationshipSourceId -Value $Value
-    if ([string]::IsNullOrWhiteSpace($sourceId)) {
-        return @()
-    }
-
-    return @($sourceId)
-}
-
-function ConvertTo-DataFabricRecordList {
-    param(
-        [AllowNull()]
-        [object]$Records
-    )
-
-    $recordList = @($Records)
-    if ($recordList.Count -eq 1 -and $recordList[0] -is [System.Collections.IEnumerable] -and $recordList[0] -isnot [string] -and $recordList[0] -isnot [pscustomobject]) {
-        $recordList = @($recordList[0])
-    }
-
-    return $recordList
-}
-
-function Get-DataFabricPackageRecordEntityIndex {
-    param(
-        [Parameter(Mandatory)]
-        [object[]]$EntityManifests,
-
-        [Parameter(Mandatory)]
-        [string]$PackageDirectory
-    )
-
-    $index = @{}
-    foreach ($entityManifest in @($EntityManifests)) {
-        $entityName = Get-PropertyValue -InputObject $entityManifest -Names @('name', 'Name')
-        $recordsPath = Get-PropertyValue -InputObject $entityManifest -Names @('recordsPath', 'RecordsPath')
-        if ([string]::IsNullOrWhiteSpace($entityName) -or [string]::IsNullOrWhiteSpace($recordsPath)) {
-            continue
-        }
-
-        $fullRecordsPath = Join-Path $PackageDirectory $recordsPath
-        if (-not (Test-Path -LiteralPath $fullRecordsPath)) {
-            continue
-        }
-
-        foreach ($record in (ConvertTo-DataFabricRecordList -Records (Import-JsonFile -Path $fullRecordsPath))) {
-            $sourceRecordId = Get-PropertyValue -InputObject $record -Names @('sourceRecordId', 'SourceRecordId')
-            if (-not [string]::IsNullOrWhiteSpace($sourceRecordId)) {
-                $index[$sourceRecordId] = $entityName
-            }
-        }
-    }
-
-    return $index
-}
-
-function Resolve-DataFabricRelationshipTargetEntityName {
-    param(
-        [Parameter(Mandatory)]
-        [object]$EntityManifest,
-
-        [Parameter(Mandatory)]
-        [string]$FieldName,
-
-        [Parameter(Mandatory)]
-        [System.Collections.IDictionary]$SourceRecordEntityIndex,
-
-        [Parameter(Mandatory)]
-        [string]$PackageDirectory
-    )
-
-    $recordsPath = Get-PropertyValue -InputObject $EntityManifest -Names @('recordsPath', 'RecordsPath')
-    if ([string]::IsNullOrWhiteSpace($recordsPath)) {
-        return [pscustomobject]@{ Resolved = $false; EntityName = $null; Reason = 'missing records path'; TargetEntities = @(); UnresolvedSourceIds = @() }
-    }
-
-    $fullRecordsPath = Join-Path $PackageDirectory $recordsPath
-    if (-not (Test-Path -LiteralPath $fullRecordsPath)) {
-        return [pscustomobject]@{ Resolved = $false; EntityName = $null; Reason = 'missing records file'; TargetEntities = @(); UnresolvedSourceIds = @() }
-    }
-
-    $targetNames = [ordered]@{}
-    $unresolvedSourceIds = @()
-    foreach ($record in (ConvertTo-DataFabricRecordList -Records (Import-JsonFile -Path $fullRecordsPath))) {
-        $relationships = Get-PropertyValue -InputObject $record -Names @('relationships')
-        if ($null -eq $relationships) {
-            continue
-        }
-
-        $value = Get-PropertyValue -InputObject $relationships -Names @($FieldName)
-        foreach ($sourceId in (Get-DataFabricRelationshipSourceIds -Value $value)) {
-            if ($SourceRecordEntityIndex.Contains($sourceId)) {
-                $targetNames[$SourceRecordEntityIndex[$sourceId]] = $true
-            }
-            else {
-                $unresolvedSourceIds += $sourceId
-            }
-        }
-    }
-
-    if ($targetNames.Keys.Count -eq 1 -and $unresolvedSourceIds.Count -eq 0) {
-        return [pscustomobject]@{ Resolved = $true; EntityName = @($targetNames.Keys)[0]; Reason = $null; TargetEntities = @($targetNames.Keys); UnresolvedSourceIds = @() }
-    }
-
-    if ($targetNames.Keys.Count -gt 1) {
-        return [pscustomobject]@{ Resolved = $false; EntityName = $null; Reason = 'multiple target entities inferred'; TargetEntities = @($targetNames.Keys); UnresolvedSourceIds = $unresolvedSourceIds }
-    }
-
-    return [pscustomobject]@{ Resolved = $false; EntityName = $null; Reason = 'target entity could not be inferred'; TargetEntities = @($targetNames.Keys); UnresolvedSourceIds = $unresolvedSourceIds }
-}
-
-function Resolve-DataFabricManifestRelationshipTargets {
-    param(
-        [Parameter(Mandatory)]
-        [object[]]$EntityManifests,
-
-        [Parameter(Mandatory)]
-        [string]$PackageDirectory
-    )
-
-    $sourceRecordEntityIndex = Get-DataFabricPackageRecordEntityIndex -EntityManifests $EntityManifests -PackageDirectory $PackageDirectory
-    $unresolved = @()
-
-    foreach ($entityManifest in @($EntityManifests)) {
-        $entityName = Get-PropertyValue -InputObject $entityManifest -Names @('name', 'Name')
-        $definitions = @(Get-DataFabricManifestRelationshipDefinitions -EntityManifest $entityManifest)
-        if ($definitions.Count -gt 0 -and $null -eq (Get-PropertyValue -InputObject $entityManifest -Names @('relationshipDefinitions'))) {
-            Set-DataFabricPropertyValue -InputObject $entityManifest -Name 'relationshipDefinitions' -Value $definitions
-        }
-
-        foreach ($definition in $definitions) {
-            $fieldName = Get-PropertyValue -InputObject $definition -Names @('fieldName', 'FieldName', 'Name')
-            $referenceEntityName = Get-PropertyValue -InputObject $definition -Names @('referenceEntityName', 'ReferenceEntityName', 'targetEntityName', 'TargetEntityName')
-            if ([string]::IsNullOrWhiteSpace($fieldName) -or -not [string]::IsNullOrWhiteSpace($referenceEntityName)) {
-                continue
-            }
-
-            $inference = Resolve-DataFabricRelationshipTargetEntityName -EntityManifest $entityManifest -FieldName $fieldName -SourceRecordEntityIndex $sourceRecordEntityIndex -PackageDirectory $PackageDirectory
-            if ($inference.Resolved) {
-                Set-DataFabricPropertyValue -InputObject $definition -Name 'referenceEntityName' -Value $inference.EntityName
-                $referenceFieldName = Get-PropertyValue -InputObject $definition -Names @('referenceFieldName', 'ReferenceFieldName', 'targetFieldName', 'TargetFieldName')
-                if ([string]::IsNullOrWhiteSpace($referenceFieldName)) {
-                    Set-DataFabricPropertyValue -InputObject $definition -Name 'referenceFieldName' -Value 'Id'
-                }
-                continue
-            }
-
-            $unresolved += [pscustomobject]@{
-                entity = $entityName
-                field = $fieldName
-                reason = $inference.Reason
-                targetEntities = $inference.TargetEntities
-                unresolvedSourceIds = $inference.UnresolvedSourceIds
-            }
-        }
-    }
-
-    return $unresolved
-}
-
-function Test-DataFabricRelationshipDependencyPath {
-    param(
-        [Parameter(Mandatory)]
-        [System.Collections.IDictionary]$DependenciesByName,
-
-        [Parameter(Mandatory)]
-        [string]$From,
-
-        [Parameter(Mandatory)]
-        [string]$Target,
-
-        [Parameter(Mandatory)]
-        [System.Collections.IDictionary]$Remaining
-    )
-
-    $visited = @{}
-    $stack = [System.Collections.Generic.List[string]]::new()
-    [void]$stack.Add($From)
-
-    while ($stack.Count -gt 0) {
-        $index = $stack.Count - 1
-        $current = $stack[$index]
-        $stack.RemoveAt($index)
-
-        if ([string]::Equals($current, $Target, [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $true
-        }
-        if ($visited.ContainsKey($current)) {
-            continue
-        }
-
-        $visited[$current] = $true
-        if (-not $Remaining.Contains($current) -or -not $DependenciesByName.Contains($current)) {
-            continue
-        }
-
-        foreach ($next in @($DependenciesByName[$current].Keys)) {
-            if (-not [string]::IsNullOrWhiteSpace($next) -and -not $visited.ContainsKey($next)) {
-                [void]$stack.Add($next)
-            }
-        }
-    }
-
-    return $false
-}
-
-function Get-DataFabricRelationshipDependencyOrderedManifests {
-    param(
-        [Parameter(Mandatory)]
-        [object[]]$EntityManifests
-    )
-
-    $manifestByName = [ordered]@{}
-    $dependenciesByName = @{}
-    foreach ($entityManifest in @($EntityManifests)) {
-        $entityName = Get-PropertyValue -InputObject $entityManifest -Names @('name', 'Name')
-        if ([string]::IsNullOrWhiteSpace($entityName)) {
-            continue
-        }
-
-        $manifestByName[$entityName] = $entityManifest
-        $dependenciesByName[$entityName] = [ordered]@{}
-    }
-
-    foreach ($entityManifest in @($EntityManifests)) {
-        $entityName = Get-PropertyValue -InputObject $entityManifest -Names @('name', 'Name')
-        if ([string]::IsNullOrWhiteSpace($entityName) -or -not $dependenciesByName.ContainsKey($entityName)) {
-            continue
-        }
-
-        foreach ($definition in @(Get-DataFabricManifestRelationshipDefinitions -EntityManifest $entityManifest)) {
-            $referenceEntityName = Get-PropertyValue -InputObject $definition -Names @('referenceEntityName', 'ReferenceEntityName', 'targetEntityName', 'TargetEntityName')
-            if ([string]::IsNullOrWhiteSpace($referenceEntityName)) {
-                continue
-            }
-            if ([string]::Equals($entityName, $referenceEntityName, [System.StringComparison]::OrdinalIgnoreCase)) {
-                continue
-            }
-            if (-not $manifestByName.Contains($referenceEntityName)) {
-                continue
-            }
-
-            $dependenciesByName[$entityName][$referenceEntityName] = $true
-        }
-    }
-
-    $remaining = [ordered]@{}
-    foreach ($entityName in @($manifestByName.Keys)) {
-        $remaining[$entityName] = $true
-    }
-
-    $orderedNames = @()
-    while ($remaining.Keys.Count -gt 0) {
-        $madeProgress = $false
-        foreach ($entityName in @($remaining.Keys)) {
-            $unmetDependencies = @()
-            foreach ($dependencyName in @($dependenciesByName[$entityName].Keys)) {
-                if ($remaining.Contains($dependencyName)) {
-                    $unmetDependencies += $dependencyName
-                }
-            }
-
-            if ($unmetDependencies.Count -gt 0) {
-                continue
-            }
-
-            $orderedNames += $entityName
-            $remaining.Remove($entityName)
-            $madeProgress = $true
-        }
-
-        if ($madeProgress) {
-            continue
-        }
-
-        $cycleBreakName = $null
-        foreach ($entityName in @($remaining.Keys)) {
-            foreach ($dependencyName in @($dependenciesByName[$entityName].Keys)) {
-                if (
-                    $remaining.Contains($dependencyName) -and
-                    (Test-DataFabricRelationshipDependencyPath -DependenciesByName $dependenciesByName -From $dependencyName -Target $entityName -Remaining $remaining)
-                ) {
-                    $cycleBreakName = $entityName
-                    break
-                }
-            }
-            if (-not [string]::IsNullOrWhiteSpace($cycleBreakName)) {
-                break
-            }
-        }
-
-        if ([string]::IsNullOrWhiteSpace($cycleBreakName)) {
-            $cycleBreakName = @($remaining.Keys)[0]
-        }
-
-        $orderedNames += $cycleBreakName
-        $remaining.Remove($cycleBreakName)
-    }
-
-    return @($orderedNames | ForEach-Object { $manifestByName[$_] })
-}
-
+# Marks entities that need single-record inserts so source IDs can be mapped to destination IDs.
 function Add-DataFabricRecordIdMappingRequirement {
     param(
         [Parameter(Mandatory)]
@@ -1587,6 +1064,7 @@ function Add-DataFabricRecordIdMappingRequirement {
     $Requirements[$EntityName][$Reason] = $true
 }
 
+# Determines which entities need destination record IDs for later attachment upload.
 function Get-DataFabricRecordIdMappingRequirements {
     param(
         [Parameter(Mandatory)]
@@ -1595,12 +1073,7 @@ function Get-DataFabricRecordIdMappingRequirements {
         [Parameter(Mandatory)]
         [object]$Manifest,
 
-        [Parameter(Mandatory)]
-        [string]$PackageDirectory,
-
-        [switch]$IncludeFiles,
-
-        [switch]$ImportRelationships
+        [switch]$IncludeFiles
     )
 
     $requirements = @{}
@@ -1628,56 +1101,6 @@ function Get-DataFabricRecordIdMappingRequirements {
         }
     }
 
-    if (-not $ImportRelationships) {
-        return $requirements
-    }
-
-    $sourceRecordEntityIndex = Get-DataFabricPackageRecordEntityIndex -EntityManifests $EntityManifests -PackageDirectory $PackageDirectory
-    foreach ($entityManifest in @($EntityManifests)) {
-        $entityName = Get-PropertyValue -InputObject $entityManifest -Names @('name', 'Name')
-        $definitions = @(Get-DataFabricManifestRelationshipDefinitions -EntityManifest $entityManifest)
-        if ($definitions.Count -eq 0) {
-            continue
-        }
-
-        $recordsPath = Get-PropertyValue -InputObject $entityManifest -Names @('recordsPath', 'RecordsPath')
-        if ([string]::IsNullOrWhiteSpace($recordsPath)) {
-            continue
-        }
-
-        $fullRecordsPath = Join-Path $PackageDirectory $recordsPath
-        if (-not (Test-Path -LiteralPath $fullRecordsPath)) {
-            continue
-        }
-
-        foreach ($record in (ConvertTo-DataFabricRecordList -Records (Import-JsonFile -Path $fullRecordsPath))) {
-            $relationships = Get-PropertyValue -InputObject $record -Names @('relationships')
-            if ($null -eq $relationships) {
-                continue
-            }
-
-            foreach ($definition in $definitions) {
-                $fieldName = Get-PropertyValue -InputObject $definition -Names @('fieldName', 'FieldName', 'Name')
-                if ([string]::IsNullOrWhiteSpace($fieldName)) {
-                    continue
-                }
-
-                $relationshipValue = Get-PropertyValue -InputObject $relationships -Names @($fieldName)
-                $sourceIds = @(Get-DataFabricRelationshipSourceIds -Value $relationshipValue)
-                if ($sourceIds.Count -eq 0) {
-                    continue
-                }
-
-                Add-DataFabricRecordIdMappingRequirement -Requirements $requirements -EntityName $entityName -Reason 'relationship mapping'
-                foreach ($sourceId in $sourceIds) {
-                    if ($sourceRecordEntityIndex.Contains($sourceId)) {
-                        Add-DataFabricRecordIdMappingRequirement -Requirements $requirements -EntityName $sourceRecordEntityIndex[$sourceId] -Reason 'relationship mapping'
-                    }
-                }
-            }
-        }
-    }
-
     return $requirements
 }
 
@@ -1693,82 +1116,6 @@ function Format-DataFabricRecordImportModeReason {
     }
 
     return "single-record mode: required for $([string]::Join(' and ', $reasonList))"
-}
-
-# Converts source relationship values to destination relationship payloads using the record ID map.
-function ConvertTo-DataFabricMappedRelationshipValue {
-    param(
-        [AllowNull()]
-        [object]$Value,
-
-        [Parameter(Mandatory)]
-        [System.Collections.IDictionary]$RecordIdMap
-    )
-
-    if ($null -eq $Value) {
-        return [pscustomobject]@{
-            Mapped = $true
-            Value = $null
-            MissingSourceIds = @()
-        }
-    }
-
-    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string] -and $Value -isnot [pscustomobject]) {
-        $mappedItems = @()
-        $missing = @()
-        foreach ($item in $Value) {
-            $mapped = ConvertTo-DataFabricMappedRelationshipValue -Value $item -RecordIdMap $RecordIdMap
-            if (-not $mapped.Mapped) {
-                $missing += $mapped.MissingSourceIds
-                continue
-            }
-            $mappedItems += $mapped.Value
-        }
-        return [pscustomobject]@{
-            Mapped = $missing.Count -eq 0
-            Value = $mappedItems
-            MissingSourceIds = $missing
-        }
-    }
-
-    $sourceId = Resolve-DataFabricRelationshipSourceId -Value $Value
-    if ([string]::IsNullOrWhiteSpace($sourceId) -or -not $RecordIdMap.Contains($sourceId)) {
-        return [pscustomobject]@{
-            Mapped = $false
-            Value = $null
-            MissingSourceIds = @($sourceId)
-        }
-    }
-
-    $destinationId = $RecordIdMap[$sourceId]
-    if ($Value -is [string]) {
-        return [pscustomobject]@{
-            Mapped = $true
-            Value = [pscustomobject]@{ Id = $destinationId }
-            MissingSourceIds = @()
-        }
-    }
-
-    $clone = ConvertTo-HashtableDeep -InputObject $Value
-    if ($clone -is [System.Collections.IDictionary]) {
-        $idUpdated = $false
-        foreach ($name in @('ID', 'Id', 'id')) {
-            if ($clone.Contains($name)) {
-                $clone[$name] = $destinationId
-                $idUpdated = $true
-                break
-            }
-        }
-        if (-not $idUpdated) {
-            $clone['Id'] = $destinationId
-        }
-    }
-
-    return [pscustomobject]@{
-        Mapped = $true
-        Value = $clone
-        MissingSourceIds = @()
-    }
 }
 
 # Makes entity and record names safe for use as folder/file names inside the package.
@@ -2279,6 +1626,8 @@ function Export-DataFabricPackage {
                 recordCount = $records.Count
                 fileFields = Get-MigratableFieldNamesByType -Schema $schema -Type FILE
                 relationshipFields = Get-MigratableFieldNamesByType -Schema $schema -Type RELATIONSHIP
+                # Relationship details are retained for audit only. The CLI does not provide enough
+                # advanced-option metadata to guarantee correct destination relationship recreation.
                 relationshipDefinitions = Get-DataFabricRelationshipFieldDefinitions -Schema $schema
                 skippedFields = $createBodyResult.SkippedFields
             }
@@ -2292,28 +1641,6 @@ function Export-DataFabricPackage {
                 entity = $name
                 id = $entityId
                 message = $_.Exception.Message
-            }
-        }
-    }
-
-    $unresolvedRelationshipTargets = @(Resolve-DataFabricManifestRelationshipTargets -EntityManifests @($manifest.entities) -PackageDirectory $WorkingDirectory)
-    foreach ($unresolved in $unresolvedRelationshipTargets) {
-        Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Export' -Stage 'Relationships' -Level 'Warn' -Message "Could not infer relationship target for $($unresolved.entity).$($unresolved.field)." -Data @{
-            entity = $unresolved.entity
-            field = $unresolved.field
-            reason = $unresolved.reason
-            unresolvedSourceIds = $unresolved.unresolvedSourceIds
-            targetEntities = $unresolved.targetEntities
-        }
-
-        $entityManifest = @($manifest.entities | Where-Object { $_.name -eq $unresolved.entity }) | Select-Object -First 1
-        if ($null -ne $entityManifest) {
-            $entityManifest.skippedFields += [pscustomobject]@{
-                name = $unresolved.field
-                reason = 'relationship field target entity could not be inferred'
-                detail = $unresolved.reason
-                unresolvedSourceIds = $unresolved.unresolvedSourceIds
-                targetEntities = $unresolved.targetEntities
             }
         }
     }
@@ -2368,8 +1695,6 @@ function Import-DataFabricPackage {
 
         [switch]$IncludeFiles,
 
-        [switch]$ImportRelationships,
-
         [scriptblock]$Invoker,
 
         [scriptblock]$ProgressCallback
@@ -2383,13 +1708,12 @@ function Import-DataFabricPackage {
         $WorkingDirectory = Join-Path (Get-Location).Path 'import-work'
     }
 
-    # Import phase 1: expand and validate the package before any destination writes are attempted.
-    Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Start' -Message 'Starting import.' -Detail "PackagePath=$PackagePath; WorkingDirectory=$WorkingDirectory; BatchSize=$BatchSize; IncludeFiles=$IncludeFiles; ImportRelationships=$ImportRelationships" -Data @{
+    # Import phase 1: expand the package, validate checksums, authenticate, and discover destination entities.
+    Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Start' -Message 'Starting import.' -Detail "PackagePath=$PackagePath; WorkingDirectory=$WorkingDirectory; BatchSize=$BatchSize; IncludeFiles=$IncludeFiles" -Data @{
         packagePath = $PackagePath
         workingDirectory = $WorkingDirectory
         batchSize = $BatchSize
         includeFiles = [bool]$IncludeFiles
-        importRelationships = [bool]$ImportRelationships
     }
 
     $packageDirectory = Expand-DataFabricPackage -PackagePath $PackagePath -DestinationRoot $WorkingDirectory
@@ -2436,10 +1760,9 @@ function Import-DataFabricPackage {
         recordIdMap = [ordered]@{}
     }
 
+    # Import phase 2: preserve package order and determine whether file uploads require record ID mapping.
     $entityManifests = @($manifest.entities)
-    [void](Resolve-DataFabricManifestRelationshipTargets -EntityManifests $entityManifests -PackageDirectory $packageDirectory)
-    $entityManifests = @(Get-DataFabricRelationshipDependencyOrderedManifests -EntityManifests $entityManifests)
-    $recordIdMappingRequirements = Get-DataFabricRecordIdMappingRequirements -EntityManifests $entityManifests -Manifest $manifest -PackageDirectory $packageDirectory -IncludeFiles:$IncludeFiles -ImportRelationships:$ImportRelationships
+    $recordIdMappingRequirements = Get-DataFabricRecordIdMappingRequirements -EntityManifests $entityManifests -Manifest $manifest -IncludeFiles:$IncludeFiles
     $choiceSetFieldsByEntityName = @{}
     $createBodyPathByEntityName = @{}
     foreach ($entityManifest in $entityManifests) {
@@ -2486,7 +1809,7 @@ function Import-DataFabricPackage {
                 }
             }
 
-            # Import phase 2a: create or reuse every destination entity before relationship schema work.
+            # Import phase 3: create or reuse base entities with unsupported fields removed from create-body.json.
             if ($destinationByName.ContainsKey($entityName)) {
                 $destinationEntity = $destinationByName[$entityName]
                 $destinationEntityId = Get-DataFabricObjectId -InputObject $destinationEntity
@@ -2542,149 +1865,37 @@ function Import-DataFabricPackage {
         }
     }
 
-    $relationshipFieldStateByEntityName = @{}
-    $relationshipImportBlockedByEntityName = @{}
-    $relationshipFieldsToRestore = @()
-    if ($ImportRelationships) {
-        foreach ($entityManifest in $entityManifests) {
-            $entityName = $entityManifest.name
-            $relationshipFieldStateByEntityName[$entityName] = @{}
-            $relationshipDefinitions = @(Get-DataFabricManifestRelationshipDefinitions -EntityManifest $entityManifest)
-            if ($relationshipDefinitions.Count -eq 0) {
-                continue
-            }
-
-            $destinationEntityId = $report.entityIdMap[$entityManifest.sourceEntityId]
-            if ([string]::IsNullOrWhiteSpace($destinationEntityId)) {
-                foreach ($definition in $relationshipDefinitions) {
-                    $report.skippedItems += [pscustomobject]@{
-                        entity = $entityName
-                        field = (Get-PropertyValue -InputObject $definition -Names @('fieldName', 'FieldName', 'Name'))
-                        reason = 'relationship field skipped because destination entity mapping is missing'
-                    }
-                }
-                continue
-            }
-
-            try {
-                $schemaArgs = Add-TenantArgument -Arguments @('df', 'entities', 'get', $destinationEntityId, '--output', 'json') -Tenant $Tenant
-                $destinationSchema = Get-UipData -Response (Invoke-DataFabricCli -Arguments $schemaArgs -Invoker $Invoker)
-                foreach ($definition in $relationshipDefinitions) {
-                    $fieldName = Get-PropertyValue -InputObject $definition -Names @('fieldName', 'FieldName', 'Name')
-                    $referenceEntityName = Get-PropertyValue -InputObject $definition -Names @('referenceEntityName', 'ReferenceEntityName', 'targetEntityName', 'TargetEntityName')
-                    if ([string]::IsNullOrWhiteSpace($fieldName)) {
-                        continue
-                    }
-
-                    $existingField = Get-DataFabricFieldByName -Schema $destinationSchema -Name $fieldName
-                    if ($null -ne $existingField) {
-                        if (Test-DataFabricRelationshipFieldCompatible -Field $existingField -Definition $definition) {
-                            $relationshipFieldStateByEntityName[$entityName][$fieldName] = [pscustomobject]@{ Ready = $true }
-                            $report.relationshipFieldsReused += [pscustomobject]@{
-                                entity = $entityName
-                                field = $fieldName
-                                destinationEntityId = $destinationEntityId
-                            }
-                        }
-                        else {
-                            $relationshipImportBlockedByEntityName[$entityName] = $true
-                            $report.failures += New-DataFabricRelationshipCompatibilityFailure -EntityName $entityName -FieldName $fieldName -Field $existingField -Definition $definition
-                            $report.skippedItems += [pscustomobject]@{
-                                entity = $entityName
-                                field = $fieldName
-                                reason = 'relationship field skipped because existing destination field is incompatible'
-                            }
-                        }
-                        continue
-                    }
-
-                    if ([string]::IsNullOrWhiteSpace($referenceEntityName)) {
-                        $report.skippedItems += [pscustomobject]@{
-                            entity = $entityName
-                            field = $fieldName
-                            reason = 'relationship field skipped because target entity could not be inferred'
-                        }
-                        continue
-                    }
-
-                    if (-not $destinationByName.ContainsKey($referenceEntityName)) {
-                        $report.skippedItems += [pscustomobject]@{
-                            entity = $entityName
-                            field = $fieldName
-                            reason = 'relationship field skipped because target destination entity is missing'
-                            targetEntity = $referenceEntityName
-                        }
-                        continue
-                    }
-
-                    $fieldBody = New-DataFabricRelationshipAddFieldBody -Definition $definition -ForceOptional
-                    $relationshipDirectory = Join-Path (Join-Path $packageDirectory 'relationship-schema') (ConvertTo-SafeFileName -Name $entityName)
-                    $relationshipFieldPath = Join-Path $relationshipDirectory ("add-$fieldName.json")
-                    ConvertTo-JsonFile -InputObject ([pscustomobject]@{ addFields = @($fieldBody) }) -Path $relationshipFieldPath
-                    $updateArgs = Add-TenantArgument -Arguments @('df', 'entities', 'update', $destinationEntityId, '--file', $relationshipFieldPath, '--output', 'json') -Tenant $Tenant
-                    if ($PSCmdlet.ShouldProcess($entityName, "Add relationship field $fieldName")) {
-                        [void](Invoke-DataFabricCli -Arguments $updateArgs -Invoker $Invoker)
-                        $relationshipFieldStateByEntityName[$entityName][$fieldName] = [pscustomobject]@{ Ready = $true }
-                        $report.relationshipFieldsAdded += [pscustomobject]@{
-                            entity = $entityName
-                            field = $fieldName
-                            destinationEntityId = $destinationEntityId
-                            targetEntity = $referenceEntityName
-                        }
-
-                        $isRequired = Get-PropertyValue -InputObject $definition -Names @('isRequired', 'Required', 'IsRequired')
-                        if ($isRequired -eq $true) {
-                            $refreshSchema = Get-UipData -Response (Invoke-DataFabricCli -Arguments $schemaArgs -Invoker $Invoker)
-                            $addedField = Get-DataFabricFieldByName -Schema $refreshSchema -Name $fieldName
-                            $fieldId = Get-DataFabricFieldId -Field $addedField
-                            if (-not [string]::IsNullOrWhiteSpace($fieldId)) {
-                                $relationshipFieldsToRestore += [pscustomobject]@{
-                                    entity = $entityName
-                                    field = $fieldName
-                                    fieldId = $fieldId
-                                    destinationEntityId = $destinationEntityId
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            catch {
-                Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Relationships' -Level 'Error' -Message "Relationship schema preparation failed for $entityName." -Detail $_.Exception.Message -Data @{
-                    entity = $entityName
-                }
-                $report.failures += [pscustomobject]@{
-                    entity = $entityName
-                    operation = 'relationship schema preparation'
-                    message = $_.Exception.Message
-                }
-            }
-        }
-    }
-
     $entityIndex = 0
     foreach ($entityManifest in $entityManifests) {
         $entityIndex++
         $entityName = $entityManifest.name
 
         try {
-            # Import phase 3: insert exported records in batches after all destination entities are known.
+            # Import phase 4: insert exported scalar record values after base entities exist.
             Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Entity' -Message "Importing entity $entityIndex/$($entityManifests.Count): $entityName" -Data @{
                 entity = $entityName
                 sourceEntityId = $entityManifest.sourceEntityId
             }
+            if (@($entityManifest.relationshipFields).Count -gt 0) {
+                Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Relationships' -Level 'Warn' -Message "Skipping unsupported relationship fields for $entityName." -Data @{
+                    entity = $entityName
+                    fields = @($entityManifest.relationshipFields)
+                    reason = $script:RelationshipImportUnsupportedReason
+                }
+                foreach ($fieldName in @($entityManifest.relationshipFields)) {
+                    $report.skippedItems += [pscustomobject]@{
+                        entity = $entityName
+                        field = $fieldName
+                        reason = $script:RelationshipImportUnsupportedReason
+                    }
+                }
+            }
+
             $destinationEntityId = $report.entityIdMap[$entityManifest.sourceEntityId]
             if ([string]::IsNullOrWhiteSpace($destinationEntityId)) {
                 $report.skippedItems += [pscustomobject]@{
                     entity = $entityName
                     reason = 'record import skipped because destination entity mapping is missing'
-                }
-                continue
-            }
-            if ($ImportRelationships -and $relationshipImportBlockedByEntityName.ContainsKey($entityName)) {
-                $report.skippedItems += [pscustomobject]@{
-                    entity = $entityName
-                    reason = 'record import skipped because relationship schema is incompatible'
                 }
                 continue
             }
@@ -2786,17 +1997,6 @@ function Import-DataFabricPackage {
                 }
             }
 
-            if (-not $ImportRelationships -and @($entityManifest.relationshipFields).Count -gt 0) {
-                Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Relationships' -Level 'Warn' -Message "Skipping relationship fields for $entityName because -ImportRelationships was not specified." -Data @{
-                    entity = $entityName
-                    fields = @($entityManifest.relationshipFields)
-                }
-                $report.skippedItems += [pscustomobject]@{
-                    entity = $entityName
-                    reason = 'relationship fields were skipped; rerun with -ImportRelationships after confirming destination relationship schema'
-                    fields = @($entityManifest.relationshipFields)
-                }
-            }
         }
         catch {
             Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Entity' -Level 'Error' -Message "Import failed for entity $entityName." -Detail $_.Exception.Message -Data @{
@@ -2810,148 +2010,8 @@ function Import-DataFabricPackage {
         }
     }
 
-    if ($ImportRelationships) {
-        $relationshipUpdateSuccessByEntity = @{}
-        foreach ($entityManifest in $entityManifests) {
-            $entityName = $entityManifest.name
-            if ($relationshipImportBlockedByEntityName.ContainsKey($entityName)) {
-                continue
-            }
-
-            $destinationEntityId = $report.entityIdMap[$entityManifest.sourceEntityId]
-            if ([string]::IsNullOrWhiteSpace($destinationEntityId)) {
-                continue
-            }
-
-            $recordsPath = Join-Path $packageDirectory $entityManifest.recordsPath
-            $records = @(Import-JsonFile -Path $recordsPath)
-            if ($records.Count -eq 1 -and (Test-PropertyExists -InputObject $records[0] -Name 'sourceRecordId') -eq $false -and $records[0] -is [System.Collections.IEnumerable]) {
-                $records = @($records[0])
-            }
-
-            Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Relationships' -Message "Updating relationship fields for $entityName."
-            foreach ($record in $records) {
-                $relationships = Get-PropertyValue -InputObject $record -Names @('relationships')
-                if ($null -eq $relationships) {
-                    continue
-                }
-
-                $destinationRecordId = $report.recordIdMap[$record.sourceRecordId]
-                if ([string]::IsNullOrWhiteSpace($destinationRecordId)) {
-                    $report.skippedItems += [pscustomobject]@{
-                        entity = $entityName
-                        sourceRecordId = $record.sourceRecordId
-                        reason = 'relationship update skipped because destination record ID is missing'
-                    }
-                    continue
-                }
-
-                $fieldState = if ($relationshipFieldStateByEntityName.ContainsKey($entityName)) { $relationshipFieldStateByEntityName[$entityName] } else { @{} }
-                $update = [ordered]@{ Id = $destinationRecordId }
-                $missing = @()
-                foreach ($relationshipProperty in $relationships.PSObject.Properties) {
-                    if (-not $fieldState.ContainsKey($relationshipProperty.Name) -or -not $fieldState[$relationshipProperty.Name].Ready) {
-                        $report.skippedItems += [pscustomobject]@{
-                            entity = $entityName
-                            sourceRecordId = $record.sourceRecordId
-                            field = $relationshipProperty.Name
-                            reason = 'relationship update skipped because destination relationship field is not ready'
-                        }
-                        continue
-                    }
-
-                    $mapped = ConvertTo-DataFabricMappedRelationshipValue -Value $relationshipProperty.Value -RecordIdMap $report.recordIdMap
-                    if (-not $mapped.Mapped) {
-                        $missing += $mapped.MissingSourceIds
-                        continue
-                    }
-                    $update[$relationshipProperty.Name] = $mapped.Value
-                }
-
-                if ($missing.Count -gt 0) {
-                    $report.skippedItems += [pscustomobject]@{
-                        entity = $entityName
-                        sourceRecordId = $record.sourceRecordId
-                        reason = 'unresolved relationship source record IDs'
-                        missingSourceIds = $missing
-                    }
-                    continue
-                }
-
-                if ($update.Keys.Count -le 1) {
-                    continue
-                }
-
-                $relationshipDirectory = Join-Path (Join-Path $packageDirectory 'relationship-updates') (ConvertTo-SafeFileName -Name $entityName)
-                New-Item -ItemType Directory -Path $relationshipDirectory -Force | Out-Null
-                $relationshipPath = Join-Path $relationshipDirectory ("$($record.sourceRecordId).json")
-                ConvertTo-JsonFile -InputObject ([pscustomobject]$update) -Path $relationshipPath
-
-                $updateArgs = Add-TenantArgument -Arguments @('df', 'records', 'update', $destinationEntityId, '--file', $relationshipPath, '--output', 'json') -Tenant $Tenant
-                if ($PSCmdlet.ShouldProcess($entityName, "Update relationships for record $destinationRecordId")) {
-                    try {
-                        [void](Invoke-DataFabricCli -Arguments $updateArgs -Invoker $Invoker)
-                        Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Relationships' -Message "Updated relationships for $entityName/$destinationRecordId." -Data @{
-                            entity = $entityName
-                            sourceRecordId = $record.sourceRecordId
-                            destinationRecordId = $destinationRecordId
-                        }
-                        $relationshipUpdateSuccessByEntity[$entityName] = $true
-                        $report.relationshipUpdates += [pscustomobject]@{
-                            entity = $entityName
-                            sourceRecordId = $record.sourceRecordId
-                            destinationRecordId = $destinationRecordId
-                        }
-                    }
-                    catch {
-                        Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Relationships' -Level 'Error' -Message "Failed to update relationships for $entityName/$destinationRecordId." -Detail $_.Exception.Message -Data @{
-                            entity = $entityName
-                            sourceRecordId = $record.sourceRecordId
-                            destinationRecordId = $destinationRecordId
-                        }
-                        $report.failures += [pscustomobject]@{
-                            entity = $entityName
-                            sourceRecordId = $record.sourceRecordId
-                            operation = 'update relationships'
-                            message = $_.Exception.Message
-                        }
-                    }
-                }
-            }
-        }
-
-        foreach ($restore in $relationshipFieldsToRestore) {
-            if (-not $relationshipUpdateSuccessByEntity.ContainsKey($restore.entity)) {
-                continue
-            }
-
-            $restoreDirectory = Join-Path (Join-Path $packageDirectory 'relationship-schema') (ConvertTo-SafeFileName -Name $restore.entity)
-            $restorePath = Join-Path $restoreDirectory ("restore-$($restore.field).json")
-            ConvertTo-JsonFile -InputObject ([pscustomobject]@{ updateFields = @([pscustomobject]@{ id = $restore.fieldId; isRequired = $true }) }) -Path $restorePath
-            $restoreArgs = Add-TenantArgument -Arguments @('df', 'entities', 'update', $restore.destinationEntityId, '--file', $restorePath, '--output', 'json') -Tenant $Tenant
-            if ($PSCmdlet.ShouldProcess($restore.entity, "Restore required relationship field $($restore.field)")) {
-                try {
-                    [void](Invoke-DataFabricCli -Arguments $restoreArgs -Invoker $Invoker)
-                    $report.relationshipFieldsRestored += [pscustomobject]@{
-                        entity = $restore.entity
-                        field = $restore.field
-                        destinationEntityId = $restore.destinationEntityId
-                    }
-                }
-                catch {
-                    $report.failures += [pscustomobject]@{
-                        entity = $restore.entity
-                        field = $restore.field
-                        operation = 'restore relationship field requirement'
-                        message = $_.Exception.Message
-                    }
-                }
-            }
-        }
-    }
-
     if ($IncludeFiles) {
-        # Import phase 3: upload exported file attachments after records exist in the destination.
+        # Import phase 5: upload exported file attachments after records exist in the destination.
         Send-DataFabricProgress -ProgressCallback $ProgressCallback -Operation 'Import' -Stage 'Files' -Message "Uploading $(@($manifest.attachments).Count) exported file attachment(s)."
         foreach ($attachment in @($manifest.attachments)) {
             $destinationEntityId = $report.entityIdMap[$attachment.sourceEntityId]
@@ -3064,8 +2124,6 @@ Export-ModuleMember -Function @(
     'ConvertTo-DataFabricExportRecord',
     'ConvertTo-DataFabricImportRecord',
     'Get-DataFabricInsertedRecordIds',
-    'ConvertTo-DataFabricMappedRelationshipValue',
-    'Get-DataFabricRelationshipDependencyOrderedManifests',
     'ConvertTo-SafeFileName',
     'Get-AttachmentFileName',
     'New-DataFabricPackageChecksums',

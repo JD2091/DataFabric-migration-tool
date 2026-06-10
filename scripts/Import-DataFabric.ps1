@@ -12,9 +12,7 @@ param(
 
     [int]$BatchSize = 50,
 
-    [switch]$IncludeFiles = $false,
-
-    [switch]$ImportRelationships = $false
+    [switch]$IncludeFiles = $false
 )
 
 # Advanced wrapper for automation scenarios that only need the import phase.
@@ -45,9 +43,6 @@ if ($WorkingDirectory) {
 }
 if ($IncludeFiles) {
     $arguments.IncludeFiles = $true
-}
-if ($ImportRelationships) {
-    $arguments.ImportRelationships = $true
 }
 if ($WhatIfPreference) {
     $arguments.WhatIf = $true
